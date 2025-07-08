@@ -1,3 +1,4 @@
+#module load mpi/openmpi-x86_64
 #---------------initialization------------------
 units cgs #mass: gram, distangce:angstrom, time:femtosec temp: Kelvin
 dimension 3
@@ -10,13 +11,13 @@ create_box 2 simbox
 # -----------Changeable parameters -----------
 
 
-variable vz equal 1.0e7
+variable vz equal 1.0e6
 variable T0 equal 15000
 variable dt equal 2.0e-17 #2e-17 sec
 variable mH equal 1.008 #Hydrogen mass g/mol
 variable mSi equal 28.09 #Silicon mass g/mol
-variable NH equal 50000
-variable NSi equal 100
+variable NH equal 1000
+variable NSi equal 1
 variable density equal 1.0 #g/cm^3
 
 #--------------------Settings-----------------
@@ -49,8 +50,9 @@ velocity all create $(v_T0) 68534 dist gaussian
 
 #--------output----------------
 thermo 1000
-thermo_style custom step temp etotal pe ke press
-dump mydmp Si custom 1000 traj.txt id type vx vy vz
+compute tempH H temp
+compute tempSi Si temp
+
 #dump mydmp2 test custom 1000 traj2.txt id type vx vy vz
 
 log firstlog
@@ -58,9 +60,17 @@ log firstlog
 #-----------------Run-----------------------
 #minimize 1.0e-9 1.0e-9 1000 1000
 fix mynvt H nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)
-run 1000
+run 8000
 unfix mynvt
 velocity Si set 0 0 $(v_vz) sum no
-variable atomfz atom $(-1*v_mSi*v_atomvz/(v_dt*v_avogadro)) #F=ma
-fix constvel Si setforce NULL NULL $(v_fz)
-run 10000000
+
+fix integrate all nve
+run 1
+variable fz_orig atom fz
+
+fix forcefix Si setforce NULL NULL 0
+dump mydmp Si custom 1000 traj.txt id type vx vy vz 
+
+thermo_style custom step temp etotal pe ke press f_forcefix[1] f_forcefix[2] f_forcefix[3]
+
+run 100000000
