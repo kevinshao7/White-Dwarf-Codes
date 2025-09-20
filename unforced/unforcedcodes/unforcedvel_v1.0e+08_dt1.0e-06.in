@@ -1,0 +1,99 @@
+#module load mpi/openmpi-x86_64
+#for f in *.sh; do sbatch "$f"; done
+
+
+# -----------Changeable parameters -----------
+variable vb equal 1.0e+08
+variable T0 equal 100000
+variable density equal 1e-6 #g/cm^3
+variable ZH equal 0.955
+variable ZSi equal 4.91
+variable ccs equal 7.14905e-20 #collision cross section in cm^2
+variable dtfrac equal 1.0e-06
+variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
+
+# --------------Constants
+variable avogadro equal 6.022e23
+variable mH equal $(0.001*1.008/v_avogadro) #Hydrogen mass kg/atom
+variable mSi equal $(0.001*28.09/v_avogadro) #Silicon mass kg/atom
+variable NH equal 500000
+variable NSi equal 2000
+variable kb equal 1.38e-23 #SI units
+variable ctostatc equal 2.99792e9 #coulomb to statcoulomb
+variable qe equal 1.60217663e-19 #SI units
+variable me equal 9.1093837e-31 #SI units electron mass
+variable e0 equal 8.8541878188e-12 #SI units permittivity
+variable pi equal 3.141592653589793238
+variable hbar equal 1.054571817e-34
+
+# --- Calculations
+variable vthh equal $(100*sqrt(3*v_kb*v_T0/v_mH)) #hydrogen thermal velocity in cm/s
+variable vths equal $(100*sqrt(3*v_kb*v_T0/v_mSi)) #silicon thermal velocity in cm/s
+variable vrel equal $(v_vb+v_vthh+v_vths)
+variable ndens equal $(v_density/(1000*v_mH)) #number density in cm^-3
+variable collfreq equal $(v_ndens*v_ccs*v_vrel)
+variable dtcoll equal $(v_dtfrac/v_collfreq)
+variable vol equal $(1000*(v_mH*v_NH+v_mSi*v_NSi)/(v_density)) #cm^3
+variable side equal $((v_vol^(1/3))) #cm -> side coordinate
+variable dttherm equal $(v_dtfrac*(v_ndens^(-1/3))/v_vths) #hydrogen collisions
+
+# -- Screening Length
+variable ne equal $(1e6*v_avogadro*v_ZH*v_density/1.008) #electron number density SI
+variable ve equal $(sqrt(3*v_kb*v_T0/v_me))
+variable wp equal $(sqrt(v_ne*(v_qe^2)/(v_me*v_e0)))
+variable lD equal $(v_ve/v_wp)
+variable TF equal $(((3*v_ne*(v_pi^2))^(2/3))*(v_hbar^2)/(2*v_me*v_kb))
+variable lS equal $(v_lD*((1+(2*v_TF/(4*v_T0)))^(1/4)))
+variable k0 equal $(1/(100*v_lS)) #screening length in cm^-1
+
+#---------------initialization------------------
+units cgs #mass: gram, distangce:angstrom, time:sec temp: Kelvin
+dimension 3
+atom_style atomic
+boundary p p p #periodic
+region simbox block 0 $(v_side) 0 $(v_side) 0 $(v_side) #sim volume 
+pair_style yukawa $(v_k0) $(v_side/20) #first is kappa inverse distance units, second is r_cutoff
+create_box 2 simbox
+
+
+
+#--------------------Settings-----------------
+mass 1 $(v_mH*1000) #Hydrogen mass in grams
+mass 2 $(v_mSi*1000) #Silicon mass in grams
+if "$(v_dttherm > v_dtcoll)" then "variable dt equal $(v_dtcoll)"
+if "$(v_dttherm <= v_dtcoll)" then "variable dt equal $(v_dttherm)"
+timestep $(v_dt)
+create_atoms 1 random $(v_NH) 34134 simbox overlap 5.0e-9 #label, random positions, number, seed, region, minimize close contacts
+create_atoms 2 random $(v_NSi) 12756 simbox overlap 5.0e-9
+group Si type 2
+group H type 1
+
+variable n equal $(v_side/20)
+neigh_modify every 1 delay 0 check yes
+neighbor ${n} bin
+neigh_modify one 10000
+neigh_modify page 100000
+pair_coeff 1 1 $(v_ZH*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 1 2 $(v_ZSi*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 2 2 $(v_ZSi*v_ZSi*v_qe*v_qe*v_ctostatc*v_ctostatc)
+velocity all create $(v_T0) 68534 dist gaussian
+
+
+#--------output----------------
+thermo 100
+compute tempH H temp
+compute tempSi Si temp
+thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
+dump mydmp Si custom 100 trajvel_v1.0e+08_dt1.0e-06.txt id type vx vy vz
+log unforcedvel_v1.0e+08_dt1.0e-06.log
+
+#-----------------Run-----------------------
+fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)
+#minimize 1.0e-5 1.0e-9 100 500000
+run 8000
+thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press
+
+unfix mynvt
+velocity Si set 0 $(sin(v_offangle)*v_vb) $(cos(v_offangle)*v_vb) sum yes
+fix mynve all nve 
+run 1000000

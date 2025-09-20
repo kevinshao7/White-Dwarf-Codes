@@ -1,0 +1,9 @@
+diffusion/run7_28/
+forced/7_27/
+unforced/run7_22/
+unforced/run7_23/
+unforced/run7_28/
+*.log
+*.txt
+*.np
+*.gif
