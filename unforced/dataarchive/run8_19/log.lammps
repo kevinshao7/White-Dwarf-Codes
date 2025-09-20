@@ -1,0 +1,118 @@
+LAMMPS (23 Jun 2022 - Update 1)
+#module load mpi/openmpi-x86_64
+#June 28 try runing smaller timestep factor 1e-4 instead of 5e-4
+#for f in *.sh; do sbatch "$f"; done
+
+#---------------initialization------------------
+units cgs #mass: gram, distangce:angstrom, time:femtosec temp: Kelvin
+dimension 3
+atom_style atomic
+boundary p p p #periodic
+region simbox block -1e-7 1e-7 -1e-7 1e-7 -1e-7 1e-7 #sim volume (60 angstrom)^3
+pair_style yukawa 233472692. 1e-8 #first is kappa inverse distance units, second is r_cutoff
+create_box 2 simbox
+Created orthogonal box = (-1e-07 -1e-07 -1e-07) to (1e-07 1e-07 1e-07)
+  4 by 2 by 5 MPI processor grid
+
+# -----------Changeable parameters -----------
+
+
+variable vz equal 1.0e+08
+variable T0 equal 15000
+variable dt equal 2.0e-18 #2e-17 sec
+variable mH equal 1.008 #Hydrogen mass g/mol
+variable mSi equal 28.09 #Silicon mass g/mol
+variable NH equal 500000
+variable NSi equal 2000
+variable density equal 1.0 #g/cm^3
+variable kb equal 1.38e-23
+variable ctostatc equal 2.99792e9 #coulomb to statcoulomb
+variable qe equal 1.60217663e-19
+variable ZH equal 0.648
+variable ZSi equal 3.84
+
+#--------------------Settings-----------------
+variable avogadro equal 6.022e23
+mass 1 $(v_mH/v_avogadro) #Hydrogen
+mass 1 1.6738625041514445899e-24 
+mass 2 $(v_mSi/v_avogadro) #Silicon
+mass 2 4.664563268017269726e-23 
+variable vol equal $((v_mH*v_NH+v_mSi*v_NSi)/(v_avogadro*v_density)) #cm^3
+variable vol equal 9.3022251743606765424e-19 
+variable side equal $((v_vol^(1/3))/2) #cm -> side coordinate
+variable side equal 4.8808892533076847343e-07 
+variable separation equal $(((v_mH/v_avogadro)/v_density)^(1/3))
+variable separation equal 1.1873349734318791029e-08
+variable thermdt equal $(5e-6*v_separation/(100*((3*v_kb*v_T0/(0.001*v_mH/v_avogadro))^0.5)))
+variable thermdt equal 3.0821754366960810035e-20
+variable veldt equal $(5e-6*v_separation/v_vz)
+variable veldt equal 5.936674867159400231e-22
+if "${thermdt} <= ${veldt}" then "variable dt equal ${thermdt}"
+if "${thermdt} > ${veldt}" then "variable dt equal ${veldt}"
+variable dt equal ${veldt}
+variable dt equal 5.9366748671594e-22
+timestep $(v_dt)
+timestep 5.936674867159400231e-22
+
+
+
+create_atoms 1 random $(v_NH) 34134 simbox overlap 1.0e-9 #label, random positions, number, seed, region, minimize close contacts
+create_atoms 1 random 500000 34134 simbox overlap 1.0e-9 
+Created 500000 atoms
+  using lattice units in orthogonal box = (-1e-07 -1e-07 -1e-07) to (1e-07 1e-07 1e-07)
+  create_atoms CPU = 7989.454 seconds
+create_atoms 2 random $(v_NSi) 12756 simbox overlap $(0.1*(v_vol/v_NH)^(1/3))
+create_atoms 2 random 2000 12756 simbox overlap $(0.1*(v_vol/v_NH)^(1/3))
+create_atoms 2 random 2000 12756 simbox overlap 1.229907022489604891e-09
+Created 2000 atoms
+  using lattice units in orthogonal box = (-1e-07 -1e-07 -1e-07) to (1e-07 1e-07 1e-07)
+  create_atoms CPU = 44.591 seconds
+group Si type 2
+2000 atoms in group Si
+group H type 1
+500000 atoms in group H
+group test id 2
+1 atoms in group test
+
+
+
+change_box all x scale $(v_side*1e7) remap
+change_box all x scale 4.8808892533076804199 remap
+Changing box ...
+  orthogonal box = (-4.8808893e-07 -1e-07 -1e-07) to (4.8808893e-07 1e-07 1e-07)
+change_box all y scale $(v_side*1e7) remap
+change_box all y scale 4.8808892533076804199 remap
+Changing box ...
+  orthogonal box = (-4.8808893e-07 -4.8808893e-07 -1e-07) to (4.8808893e-07 4.8808893e-07 1e-07)
+change_box all z scale $(v_side*1e7) remap
+change_box all z scale 4.8808892533076804199 remap
+Changing box ...
+  orthogonal box = (-4.8808893e-07 -4.8808893e-07 -4.8808893e-07) to (4.8808893e-07 4.8808893e-07 4.8808893e-07)
+
+variable n equal ${side}/4
+variable n equal 4.88088925330768e-07/4
+neigh_modify every 1 delay 0 check yes
+neighbor ${n} bin
+neighbor 1.22022231332692e-07 bin
+neigh_modify one 5000
+neigh_modify page 50000
+pair_coeff 1 1 $(v_ZH*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 1 1 9.6874812720847214635e-20
+pair_coeff 1 2 $(v_ZSi*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 1 2 5.7407296427168704804e-19
+pair_coeff 2 2 $(v_ZSi*v_ZSi*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 2 2 3.4019138623507382051e-18
+velocity all create $(v_T0) 68534 dist gaussian
+velocity all create 15000 68534 dist gaussian
+
+
+#--------output----------------
+thermo 100
+compute tempH H temp
+compute tempSi Si temp
+
+thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press
+dump mydmp Si custom 100 trajvel_1.0e+08.txt id type vx vy vz
+#dump mydmp2 test custom 1000 traj2.txt id type vx vy vz
+
+log unforcedvel_1.0e+08.log
