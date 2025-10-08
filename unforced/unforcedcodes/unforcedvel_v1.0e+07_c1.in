@@ -3,13 +3,13 @@
 
 
 # -----------Changeable parameters -----------
-variable vb equal 1.0e+08
-variable T0 equal 100000
-variable density equal 1e-6 #g/cm^3
-variable ZH equal 0.955
-variable ZSi equal 4.91
-variable ccs equal 7.14905e-20 #collision cross section in cm^2
-variable dtfrac equal 1.0e-05
+variable vb equal 1.0e+07
+variable T0 equal 5.00000e+03
+variable density equal 1.00000e+00 #g/cm^3, hydrogen density
+variable ZH equal 6.50000e-01
+variable ZSi equal 3.82000e+00
+variable ccs equal 7.03444e-17 #collision cross section in cm^2
+variable dtfrac equal 1e-4
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
 # --------------Constants
@@ -29,13 +29,12 @@ variable hbar equal 1.054571817e-34
 # --- Calculations
 variable vthh equal $(100*sqrt(3*v_kb*v_T0/v_mH)) #hydrogen thermal velocity in cm/s
 variable vths equal $(100*sqrt(3*v_kb*v_T0/v_mSi)) #silicon thermal velocity in cm/s
-variable vrel equal $(v_vb+v_vthh+v_vths)
 variable ndens equal $(v_density/(1000*v_mH)) #number density in cm^-3
+variable vrel equal $(v_vthh+v_vths+v_vb)
 variable collfreq equal $(v_ndens*v_ccs*v_vrel)
-variable dtcoll equal $(v_dtfrac/v_collfreq)
-variable vol equal $(1000*(v_mH*v_NH+v_mSi*v_NSi)/(v_density)) #cm^3
+variable vol equal $(1000*(v_mH*v_NH)/(v_density)) #cm^3
 variable side equal $((v_vol^(1/3))) #cm -> side coordinate
-variable dttherm equal $(v_dtfrac*(v_ndens^(-1/3))/v_vths) #hydrogen collisions
+variable dt equal $(v_dtfrac*v_side/(v_vthh+v_vb)) 
 
 # -- Screening Length
 variable ne equal $(1e6*v_avogadro*v_ZH*v_density/1.008) #electron number density SI
@@ -60,8 +59,6 @@ create_box 2 simbox
 #--------------------Settings-----------------
 mass 1 $(v_mH*1000) #Hydrogen mass in grams
 mass 2 $(v_mSi*1000) #Silicon mass in grams
-if "$(v_dttherm > v_dtcoll)" then "variable dt equal $(v_dtcoll)"
-if "$(v_dttherm <= v_dtcoll)" then "variable dt equal $(v_dttherm)"
 timestep $(v_dt)
 create_atoms 1 random $(v_NH) 34134 simbox overlap 5.0e-9 #label, random positions, number, seed, region, minimize close contacts
 create_atoms 2 random $(v_NSi) 12756 simbox overlap 5.0e-9
@@ -84,8 +81,8 @@ thermo 100
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
-dump mydmp Si custom 100 trajvel_v1.0e+08_dt1.0e-05.txt id type vx vy vz
-log unforcedvel_v1.0e+08_dt1.0e-05.log
+dump mydmp Si custom 100 trajvel_v1.0e+07_c1.txt id type vx vy vz
+log unforcedvel_v1.0e+07_c1.log
 
 #-----------------Run-----------------------
 fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)
