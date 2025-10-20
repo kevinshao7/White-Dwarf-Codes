@@ -3,13 +3,13 @@
 
 
 # -----------Changeable parameters -----------
-variable vb equal 1.0e7
-variable T0 equal 100000
-variable rhoH equal 1.0e-5 #gcc
-variable rhoS equal 1.79e-4 #gcc
-variable ZH equal 0.955
-variable ZSi equal 4.91
-variable ccs equal 1e-6 #collision cross section in cm^2
+variable vb equal 7.0e+05
+variable T0 equal 1.00000e+05
+variable rhoH equal 1.00000e-05
+variable rhoS equal 6.20000e-05 #gcc
+variable ZH equal 9.30000e-01
+variable ZSi equal 4.27000e+00
+variable ccs equal 5.15606e-15 #collision cross section in cm^2
 variable dtfrac equal 1e-2
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
@@ -82,8 +82,8 @@ thermo 100
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
-dump mydmp Si custom 100 traj.txt id type vx vy vz
-log firstlog
+dump mydmp Si custom 100 trajvel_v7.0e+05_c2.txt id type vx vy vz
+log unforcedvel_v7.0e+05_c2.log
 
 #-----------------Run-----------------------
 fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)

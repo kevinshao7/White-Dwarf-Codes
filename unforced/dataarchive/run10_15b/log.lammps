@@ -1,22 +1,25 @@
+LAMMPS (23 Jun 2022 - Update 1)
 #module load mpi/openmpi-x86_64
 #for f in *.sh; do sbatch "$f"; done
 
 
 # -----------Changeable parameters -----------
-variable vb equal 1.0e7
-variable T0 equal 100000
-variable rhoH equal 1.0e-5 #gcc
-variable rhoS equal 1.79e-4 #gcc
-variable ZH equal 0.955
-variable ZSi equal 4.91
-variable ccs equal 1e-6 #collision cross section in cm^2
+variable vb equal 1.0e+08
+variable T0 equal 1.00000e+05
+variable rhoH equal 1.00000e+00
+variable rhoS equal 7.20000e+00 #gcc
+variable ZH equal 6.80000e-01
+variable ZSi equal 3.81000e+00
+variable ccs equal 2.15803e-20 #collision cross section in cm^2
 variable dtfrac equal 1e-2
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
 # --------------Constants
 variable avogadro equal 6.022e23
 variable mH equal $(0.001*1.008/v_avogadro) #Hydrogen mass kg/atom
+variable mH equal 1.6738625041514447162e-27 
 variable mSi equal $(0.001*28.09/v_avogadro) #Silicon mass kg/atom
+variable mSi equal 4.6645632680172696525e-26 
 variable NH equal 500000
 variable NSi equal 2000
 variable kb equal 1.38e-23 #SI units
@@ -29,52 +32,93 @@ variable hbar equal 1.054571817e-34
 
 # --- Calculations
 variable vthh equal $(100*sqrt(3*v_kb*v_T0/v_mH)) #hydrogen thermal velocity in cm/s
+variable vthh equal 4973249.8716346789151 
 variable vths equal $(100*sqrt(3*v_kb*v_T0/v_mSi)) #silicon thermal velocity in cm/s
+variable vths equal 942094.95159904577304 
 variable ndens equal $(v_rhoH/(1000*v_mH)) #number density in cm^-3
+variable ndens equal 5.9742063492063652794e+23 
 variable vrel equal $(v_vthh+v_vths+v_vb)
+variable vrel equal 105915344.82323372364
 variable collfreq equal $(v_ndens*v_ccs*v_vrel)
+variable collfreq equal 1365515333678.8317871
 variable vol equal $((1000*(v_mH*v_NH)/v_rhoH)+(1000*(v_mSi*v_NSi)/v_rhoS)) #cm^3
+variable vol equal 8.4988837226465687131e-19 
 variable side equal $((v_vol^(1/3))) #cm -> side coordinate
-variable dt equal $(v_dtfrac*v_side/((v_vthh+v_vb)*((v_NH+v_NSi)^(1/3)))) 
+variable side equal 9.4722676815167154043e-07 
+variable dt equal $(v_dtfrac*v_side/((v_vthh+v_vb)*((v_NH+v_NSi)^(1/3))))
+variable dt equal 1.1353787127378879337e-18
 
 # -- Screening Length
 variable ne equal $(1e6*v_avogadro*v_ZH*v_rhoH/1.008) #electron number density SI
+variable ne equal 4.0624603174603173694e+29 
 variable ve equal $(sqrt(3*v_kb*v_T0/v_me))
+variable ve equal 2131845.2332628429867
 variable wp equal $(sqrt(v_ne*(v_qe^2)/(v_me*v_e0)))
+variable wp equal 35957219039420564
 variable lD equal $(v_ve/v_wp)
+variable lD equal 5.9288379085314048945e-11
 variable TF equal $(((3*v_ne*(v_pi^2))^(2/3))*(v_hbar^2)/(2*v_me*v_kb))
+variable TF equal 232217.17206053543487
 variable lS equal $(v_lD*((1+(2*v_TF/(4*v_T0)))^(1/4)))
+variable lS equal 7.1884885044329976425e-11
 variable k0 equal $(1/(100*v_lS)) #screening length in cm^-1
+variable k0 equal 139111302.65887182951 
 
 #---------------initialization------------------
 units cgs #mass: gram, distangce:angstrom, time:sec temp: Kelvin
 dimension 3
 atom_style atomic
 boundary p p p #periodic
-region simbox block 0 $(v_side) 0 $(v_side) 0 $(v_side) #sim volume 
+region simbox block 0 $(v_side) 0 $(v_side) 0 $(v_side) #sim volume
+region simbox block 0 9.4722676815167196394e-07 0 $(v_side) 0 $(v_side) 
+region simbox block 0 9.4722676815167196394e-07 0 9.4722676815167196394e-07 0 $(v_side) 
+region simbox block 0 9.4722676815167196394e-07 0 9.4722676815167196394e-07 0 9.4722676815167196394e-07 
 pair_style yukawa $(v_k0) $(v_side/20) #first is kappa inverse distance units, second is r_cutoff
+pair_style yukawa 139111302.65887200832 $(v_side/20) 
+pair_style yukawa 139111302.65887200832 4.7361338407583596874e-08 
 create_box 2 simbox
+Created orthogonal box = (0 0 0) to (9.4722677e-07 9.4722677e-07 9.4722677e-07)
+  2 by 2 by 5 MPI processor grid
 
 
 
 #--------------------Settings-----------------
 mass 1 $(v_mH*1000) #Hydrogen mass in grams
+mass 1 1.6738625041514401818e-24 
 mass 2 $(v_mSi*1000) #Silicon mass in grams
+mass 2 4.6645632680172703138e-23 
 timestep $(v_dt)
+timestep 1.1353787127378900522e-18
 create_atoms 1 random $(v_NH) 34134 simbox overlap 5.0e-9 #label, random positions, number, seed, region, minimize close contacts
+create_atoms 1 random 500000 34134 simbox overlap 5.0e-9 
+Created 500000 atoms
+  using lattice units in orthogonal box = (0 0 0) to (9.4722677e-07 9.4722677e-07 9.4722677e-07)
+  create_atoms CPU = 150.307 seconds
 create_atoms 2 random $(v_NSi) 12756 simbox overlap 5.0e-9
+create_atoms 2 random 2000 12756 simbox overlap 5.0e-9
+Created 2000 atoms
+  using lattice units in orthogonal box = (0 0 0) to (9.4722677e-07 9.4722677e-07 9.4722677e-07)
+  create_atoms CPU = 1.384 seconds
 group Si type 2
+2000 atoms in group Si
 group H type 1
+500000 atoms in group H
 
 variable n equal $(v_side/20)
+variable n equal 4.7361338407583596874e-08
 neigh_modify every 1 delay 0 check yes
 neighbor ${n} bin
+neighbor 4.73613384075836e-08 bin
 neigh_modify one 10000
 neigh_modify page 100000
 pair_coeff 1 1 $(v_ZH*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 1 1 1.0667893947692746804e-19
 pair_coeff 1 2 $(v_ZSi*v_ZH*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 1 2 5.9771582265749058295e-19
 pair_coeff 2 2 $(v_ZSi*v_ZSi*v_qe*v_qe*v_ctostatc*v_ctostatc)
+pair_coeff 2 2 3.3489665945956463143e-18
 velocity all create $(v_T0) 68534 dist gaussian
+velocity all create 100000 68534 dist gaussian
 
 
 #--------output----------------
@@ -82,16 +126,5 @@ thermo 100
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
-dump mydmp Si custom 100 traj.txt id type vx vy vz
-log firstlog
-
-#-----------------Run-----------------------
-fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)
-#minimize 1.0e-5 1.0e-9 100 500000
-run 2000 # 8000 before 10/18
-thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press
-
-unfix mynvt
-velocity Si set 0 $(sin(v_offangle)*v_vb) $(cos(v_offangle)*v_vb) sum yes
-fix mynve all nve 
-run 1000000
+dump mydmp Si custom 100 trajvel_v1.0e+08_c3.txt id type vx vy vz
+log unforcedvel_v1.0e+08_c3.log

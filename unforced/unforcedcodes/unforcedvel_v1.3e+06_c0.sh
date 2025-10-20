@@ -3,10 +3,10 @@
 #SBATCH --mail-type=END
 #SBATCH --mail-user=ks2120@cam.ac.uk
 #SBATCH -n 20
-#SBATCH -o unforced_baselog.txt
+#SBATCH -o unforcedslumlogvel_v1.3e+06_c0.txt
 module load openmpi/2.1.1/b1
 module load voro/0.4.6
 module load eigen/3.3.2
 module load latte/1.1.1
 module load lammps/23Jun2022/b1
-mpiexec -n 20 lmp_mpi -in unforced_base.in
+mpiexec -n 20 lmp_mpi -in unforcedvel_v1.3e+06_c0.in
