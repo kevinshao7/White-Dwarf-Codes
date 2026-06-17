@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=standard --time 11:00:00 
+#SBATCH --partition=standard --time 1:00:00 
 #SBATCH --mail-type=END
 #SBATCH --mail-user=ks2120@cam.ac.uk
 #SBATCH -n 40
@@ -10,4 +10,4 @@ module load voro/0.4.6
 module load eigen/3.3.2
 module load latte/1.1.1
 module load lammps/23Jun2022/b1
-mpiexec -n 40 lmp_mpi -in unforcedvel_v3.0e+06_c0.in
+mpiexec -n 20 lmp_mpi -in unforcedvel_v3.0e+06_c0.in

@@ -22,7 +22,7 @@ class DragFourth:
     Z2arr = np.array([0.26,3.82,4.27,3.81],dtype=np.float64)
     gccarr =  np.array([1e-5,1,1e-5,1],dtype=np.float64)
     Tarr = np.array([5000,5000,1e5,1e5],dtype=np.float64)
-    def __init__(self,conditions,vres=50,rhores=50,ures=50):
+    def __init__(self,conditions,vres=100,rhores=100,ures=100):
         self.vres=vres #resolution of velocity integration
         self.rhores=rhores #resolution of impact parameter integration
         self.ures = ures
@@ -31,11 +31,14 @@ class DragFourth:
         self.gcc = self.gccarr[conditions]
         self.T = self.Tarr[conditions]
         self.nh = 1e6*self.gcc/(1000*self.mh)
-        self.umin = self.nh**(1/3)
         ne =1e6* self.NA*self.z1*self.gcc/1.008 #electron number density in SI
         ve = np.sqrt(3*self.kb*self.T/self.me)
         wp = np.sqrt(ne*(self.qe**2)/(self.me*self.e0))
         self.lD = ve/wp
+
+        self.umin = self.nh**(1/3)
+
+
         Tf = ((3*ne*(self.pi**2))**(2/3))*(self.hbar**2)/(2*self.me*self.kb)
         lS = self.lD*np.power(1+(2*Tf/(3*self.T)),1/4)
         self.k0 = 1/lS #screening length in m
@@ -57,6 +60,8 @@ class DragFourth:
         # guess = 1e8
         return result
         # return newton(umaxfunc,fprime= dumaxfunc,x0=guess,args=(rho,A,k0,E),maxiter=2000,rtol=1e-20)
+    #phi is angle of closest approach
+    
     def phicutoff(self,rho,E,C): #numerically integrate excess phiC
         results=np.zeros(len(rho))
         umaxarr = self.umax(rho,E)
@@ -68,7 +73,7 @@ class DragFourth:
     def phiC(self,rho,E): #vectorized in rho
         u0 = self.umax(rho,E)
         C = self.A*np.exp(-self.k0/u0) 
-        return self.pi/2-np.atan(C/(2*rho*(E)))-self.phicutoff(rho,E,C) #start particle at rmax, subtract energy at rmax
+        return self.pi/2-np.atan(C/(2*rho*(E)))#-self.phicutoff(rho,E,C) #start particle at rmax, subtract energy at rmax
 
     def dphiint(self,u,rho,E,C): #vectorized in u, scalar in E
         # return self.Yint(u,rho,E)-self.Cint(u,rho,E,C)
@@ -88,7 +93,7 @@ class DragFourth:
         for i in range(len(rho)):
             rhoi = rho[i]
             Ci = C[i]
-            uarr = np.linspace(self.umin,(1-frac)*u0[i],steps)
+            uarr = np.linspace(0,(1-frac)*u0[i],steps)
             # plt.plot(uarr,np.abs(self.dphiint(uarr,rhoi,E,C[i])))
             # plt.xscale("log")
             # plt.yscale("log")
@@ -102,17 +107,17 @@ class DragFourth:
     def drag(self,vb): #Newtons, vectorized in v
         sigmav = np.sqrt(self.kb*self.T/self.mu) #standard deviation in velocity due to thermal effects
 
-        varr = np.linspace(max(1e-5,vb-4*sigmav),vb+4*sigmav,self.vres)
-        rhoup = min([self.lD,self.nh**(-1/3)])#upper bound of integration for impact parameter
+        varr = np.linspace(vb-4*sigmav,vb+4*sigmav,self.vres)
+        rhoup = max([self.lD,self.nh**(-1/3)])#upper bound of integration for impact parameter
         rhoarr = np.zeros(self.rhores)
         drho = np.zeros(self.rhores)
-        for i in range(self.rhores): #rho1**2 - drh0**2 = self.lD**2/self.rhores
+        for i in range(self.rhores):
             if i == 0:
                 drho[0] = np.sqrt(rhoup**2/self.rhores)
-                rhoarr[0] = 0
+                rhoarr[0] = 0.5 * drho[0]   # small nonzero midpoint
             else:
-                rhoarr[i] = np.sqrt(rhoup**2/self.rhores+rhoarr[i-1]**2)
-                drho[i] = rhoarr[i]-rhoarr[i-1]
+                rhoarr[i] = np.sqrt(rhoup**2/self.rhores + rhoarr[i-1]**2)
+                drho[i] = rhoarr[i] - rhoarr[i-1]
         # rhoarr = np.linspace(1e-24,rhoup,self.rhores)
         # drho = rhoarr[1]-rhoarr[0]
         dv = varr[1]-varr[0]
@@ -123,16 +128,104 @@ class DragFourth:
         print("phi")
         for i in range(len(varr)):
             phiyarr[i,:] = self.phiY(rhoarr,Earr[i])#deflection angle due to yukawa
-        phiyarr = np.minimum(phiyarr,self.pi/2)
-        phiyarr=np.maximum(phiyarr,0)
+        # phiyarr = np.minimum(phiyarr,self.pi/2)
+        # phiyarr=np.maximum(phiyarr,0)
         print("drag")
         for i in range(len(varr)):
-            result += np.sum(rhoarr*drho*(varr[i]**2)*fvarr[i]*(1-np.cos(self.pi-2*phiyarr[i,:]))) 
+            result += np.sum(rhoarr*drho*(varr[i]*abs(varr[i]))*fvarr[i]*(1-np.cos(self.pi-2*phiyarr[i,:]))) 
         return 2*self.pi*self.nh*self.mu*result*dv #drag force on silicon
+    # def head_on_phi(self, E, rho_frac=1e-8):
+    #     """
+    #     Approximate the head-on (rho -> 0) scattering angle.
+    #     Uses a tiny nonzero impact parameter because the current
+    #     phiY machinery is not numerically safe at exactly rho = 0.
+    #     """
+    #     rhoup = max(self.lD, self.nh**(-1/3))
+    #     rho_eps = max(rhoup * rho_frac, 1e-30)
+    #     phi = self.phiY(np.array([rho_eps], dtype=np.float64), E)[0]
+    #     phi = min(phi, self.pi / 2)
+    #     phi = max(phi, 0.0)
+    #     return phi
 
+    # def drag_head_on(self, vb, rho_frac=1e-8):
+    #     """
+    #     Debug drag model: assume every collision is head-on.
+    #     That is, replace the impact-parameter-dependent scattering
+    #     angle by the rho -> 0 angle for the same collision energy.
+
+    #     This is NOT a physically correct cross-section treatment;
+    #     it is only for debugging the high-velocity scaling.
+    #     """
+    #     sigmav = np.sqrt(self.kb * self.T / self.mu)
+
+    #     varr = np.linspace(vb - 4 * sigmav, vb + 4 * sigmav, self.vres)
+    #     dv = varr[1] - varr[0]
+
+    #     rhoup = max(self.lD, self.nh**(-1/3))
+    #     area = self.pi * rhoup**2
+
+    #     Earr = 0.5 * self.mu * np.square(varr)
+    #     fvarr = np.sqrt(self.mu / (2 * self.pi * self.kb * self.T)) * \
+    #             np.exp(-self.mu * np.square(varr - vb) / (2 * self.kb * self.T))
+
+    #     result = 0.0
+    #     print("head-on phi")
+    #     for i in range(len(varr)):
+    #         phi0 = self.head_on_phi(Earr[i], rho_frac=rho_frac)
+    #         result += (varr[i]*abs(varr[i])) * fvarr[i] * (1 - np.cos(self.pi - 2 * phi0))
+
+    #     return self.nh * self.mu * area * result * dv
+    # def sigma_transport(self, vb):  # m^2, thermally averaged transport cross section
+    #     sigmav = np.sqrt(self.kb * self.T / self.mu)
+
+    #     varr = np.linspace(max(1e-5, vb - 4 * sigmav), vb + 4 * sigmav, self.vres)
+    #     rhoup = max([self.lD, self.nh**(-1/3)])
+
+    #     rhoarr = np.zeros(self.rhores)
+    #     drho = np.zeros(self.rhores)
+    #     for i in range(self.rhores):
+    #         if i == 0:
+    #             drho[0] = np.sqrt(rhoup**2 / self.rhores)
+    #             rhoarr[0] = 0.5 * drho[0]
+    #         else:
+    #             rhoarr[i] = np.sqrt(rhoup**2 / self.rhores + rhoarr[i-1]**2)
+    #             drho[i] = rhoarr[i] - rhoarr[i-1]
+
+    #     dv = varr[1] - varr[0]
+    #     Earr = 0.5 * self.mu * np.square(varr)
+    #     fvarr = np.sqrt(self.mu / (2 * self.pi * self.kb * self.T)) * \
+    #             np.exp(-self.mu * ((varr - vb)**2) / (2 * self.kb * self.T))
+
+    #     phiyarr = np.zeros((self.vres, self.rhores))
+    #     print("sigma transport phi")
+    #     for i in range(len(varr)):
+    #         phiyarr[i, :] = self.phiY(rhoarr, Earr[i])
+
+    #     phiyarr = np.minimum(phiyarr, self.pi / 2)
+    #     phiyarr = np.maximum(phiyarr, 0)
+
+    #     result = 0.0
+    #     print("sigma transport")
+    #     for i in range(len(varr)):
+    #         result += np.sum(rhoarr * drho * fvarr[i] * (1 - np.cos(self.pi - 2 * phiyarr[i, :])))
+
+    #     return 2 * self.pi * result * dv
 vb = 1e4
 y = np.zeros(4)
+y_head = np.zeros(4)
+y_sigma = np.zeros(4)
+
 for i in range(4):
     calcdrag = DragFourth(i)
-    y[i]=calcdrag.drag(vb)
-np.save("theory_{:.1e}".format(vb),y)
+    y[i] = calcdrag.drag(vb)
+    # y_head[i] = calcdrag.drag_head_on(vb)
+    # y_sigma[i] = calcdrag.sigma_transport(vb)
+
+out = np.zeros((4, 3))
+out[:, 0] = y_sigma
+out[:, 1] = y
+out[:, 2] = y_head
+
+np.save("theory_rmaxDB_{:.1e}".format(vb), out)
+print("Saved columns: sigma_transport [m^2], drag [N], drag_head_on [N]")
+print("Fully Successful")
