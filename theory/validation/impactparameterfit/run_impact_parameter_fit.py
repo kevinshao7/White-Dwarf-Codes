@@ -4,6 +4,7 @@ import argparse
 import csv
 import math
 import os
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -22,7 +23,9 @@ from common import CM_PER_S_TO_M_PER_S, condition_label, make_drag, quiet_drag, 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALL_CONDITIONS = (0, 1, 2, 3)
+STRONGLY_COUPLED_CONDITIONS = (1, 3)
 COUPLING_PARAMETER = {0: 0.03, 1: 1.94, 2: 0.42, 3: 1.05}
+LAMMPS_SOURCE_RE = re.compile(r"\[(\d+),(\d+),(\d+)\]$")
 
 
 @dataclass(frozen=True)
@@ -148,15 +151,80 @@ def relative_acceleration_error(point: DataPoint) -> float:
     return point.acceleration_sigma_cm_s2 / point.acceleration_cm_s2
 
 
-def select_lowest_relative_error_points(points: list[DataPoint], points_per_condition: int) -> list[DataPoint]:
-    selected: list[DataPoint] = []
-    for condition in sorted({point.condition for point in points}):
-        group = sorted(
-            (point for point in points if point.condition == condition),
-            key=lambda point: (relative_acceleration_error(point), point.velocity_cm_s),
+def lammps_campaign_id(point: DataPoint) -> int | None:
+    match = LAMMPS_SOURCE_RE.search(point.source)
+    return int(match.group(2)) if match else None
+
+
+def lowest_relative_error_points(points: list[DataPoint], count: int) -> list[DataPoint]:
+    return sorted(points, key=lambda point: (relative_acceleration_error(point), point.velocity_cm_s))[:count]
+
+
+def group_points_by_lammps_campaign(points: list[DataPoint]) -> dict[int, list[DataPoint]]:
+    campaigns: dict[int, list[DataPoint]] = {}
+    for point in points:
+        campaign_id = lammps_campaign_id(point)
+        if campaign_id is not None:
+            campaigns.setdefault(campaign_id, []).append(point)
+    return campaigns
+
+
+def campaign_velocity(campaign_points: list[DataPoint]) -> float:
+    return max(point.velocity_cm_s for point in campaign_points)
+
+
+def select_log_spaced_campaign_points(
+    points: list[DataPoint],
+    count: int,
+    min_velocity_cm_s: float = 1.0e5,
+    max_velocity_cm_s: float = 1.0e8,
+) -> list[DataPoint]:
+    campaigns = group_points_by_lammps_campaign(points)
+    if len(campaigns) < count:
+        return lowest_relative_error_points(points, count)
+
+    candidates = {
+        campaign_id: campaign_points
+        for campaign_id, campaign_points in campaigns.items()
+        if min_velocity_cm_s <= campaign_velocity(campaign_points) <= max_velocity_cm_s
+    }
+    if len(candidates) < count:
+        candidates = campaigns
+
+    selected_campaigns: list[list[DataPoint]] = []
+    targets = np.geomspace(min_velocity_cm_s, max_velocity_cm_s, count)
+    for target in targets:
+        campaign_id, campaign_points = min(
+            candidates.items(),
+            key=lambda item: abs(math.log(campaign_velocity(item[1]) / target)),
         )
-        selected.extend(group[:points_per_condition])
-    return selected
+        selected_campaigns.append(campaign_points)
+        del candidates[campaign_id]
+        if not candidates:
+            break
+
+    selected = [lowest_relative_error_points(campaign_points, 1)[0] for campaign_points in selected_campaigns]
+    return sorted(selected, key=lambda point: point.velocity_cm_s)
+
+
+def select_fit_points(points: list[DataPoint], points_per_condition: int) -> tuple[list[DataPoint], dict[int, str]]:
+    selected: list[DataPoint] = []
+    descriptions: dict[int, str] = {}
+    for condition in sorted({point.condition for point in points}):
+        group = [point for point in points if point.condition == condition]
+        if condition in STRONGLY_COUPLED_CONDITIONS:
+            condition_points = select_log_spaced_campaign_points(group, points_per_condition)
+            if len({lammps_campaign_id(point) for point in condition_points if lammps_campaign_id(point) is not None}) == len(condition_points):
+                descriptions[condition] = (
+                    "lowest acceleration_sigma / acceleration point from roughly log-spaced LAMMPS campaigns between 1e5 and 1e8 cm/s"
+                )
+            else:
+                descriptions[condition] = "lowest acceleration_sigma / acceleration"
+        else:
+            condition_points = lowest_relative_error_points(group, points_per_condition)
+            descriptions[condition] = "lowest acceleration_sigma / acceleration"
+        selected.extend(condition_points)
+    return selected, descriptions
 
 
 def make_drag_for_fit(
@@ -185,16 +253,23 @@ def make_drag_for_fit(
     raise ValueError(f"Unknown fit parameter: {fit_parameter}")
 
 
+def ion_screening_length(drag) -> float:
+    return math.sqrt(drag.e0 * drag.kb * drag.T / (drag.nh * np.square(drag.z1 * drag.qe)))
+
+
 def prediction_metadata(drag, fit_value: float, fit_parameter: str) -> dict[str, float]:
+    ion_screening_length_m = ion_screening_length(drag)
     yukawa_screening_length_m = 1.0 / drag.k0
     impact_parameter_upper_bound_m = drag.rhomax_fraction / drag.ustart
     interparticle_spacing_m = 1.0 / drag.ustart
     return {
         "rhomax_fraction_of_interparticle_spacing": float(impact_parameter_upper_bound_m / interparticle_spacing_m),
         "rhomax_fraction_of_debye_length": float(impact_parameter_upper_bound_m / drag.lD),
+        "rhomax_fraction_of_ion_screening_length": float(impact_parameter_upper_bound_m / ion_screening_length_m),
         "rhomax_fraction_of_yukawa_screening_length": float(impact_parameter_upper_bound_m / yukawa_screening_length_m),
         "dragbase_rhomax_fraction_of_outer_radius": float(drag.rhomax_fraction),
         "electron_debye_radius_m": float(drag.lD),
+        "ion_screening_length_m": float(ion_screening_length_m),
         "yukawa_screening_length_m": float(yukawa_screening_length_m),
         "impact_parameter_upper_bound_m": float(impact_parameter_upper_bound_m),
         "outer_radius_m": float(1.0 / drag.ustart),
@@ -516,9 +591,9 @@ def plot_results(
                 f"condition {condition}, Gamma={COUPLING_PARAMETER.get(condition, math.nan):.2g}, "
                 f"bmax/aH="
                 f"{format_uncertainty(float(best['rhomax_fraction_of_interparticle_spacing']), best.get('rhomax_fraction_of_interparticle_spacing_sigma'), best.get('rhomax_fraction_of_interparticle_spacing_sigma'))}, "
-                f"bmax/lD="
-                f"{format_uncertainty(float(best['rhomax_fraction_of_debye_length']), best.get('rhomax_fraction_of_debye_length_sigma'), best.get('rhomax_fraction_of_debye_length_sigma'))}, "
-                f"bmax/lS="
+                f"bmax/lion="
+                f"{format_uncertainty(float(best['rhomax_fraction_of_ion_screening_length']), best.get('rhomax_fraction_of_ion_screening_length_sigma'), best.get('rhomax_fraction_of_ion_screening_length_sigma'))}, "
+                f"bmax/lY="
                 f"{format_uncertainty(float(best['rhomax_fraction_of_yukawa_screening_length']), best.get('rhomax_fraction_of_yukawa_screening_length_sigma'), best.get('rhomax_fraction_of_yukawa_screening_length_sigma'))}"
             ),
         )
@@ -630,7 +705,7 @@ def main() -> None:
     else:
         all_points = load_lammps_expfit_points(args.lammps_results, requested_conditions, args.samples_per_lammps_fit)
     all_points = filter_points(all_points, args.min_velocity_cm_s, args.max_velocity_cm_s, args.max_relative_sigma)
-    fit_points = select_lowest_relative_error_points(all_points, args.fit_points_per_condition)
+    fit_points, fit_point_selection_by_condition = select_fit_points(all_points, args.fit_points_per_condition)
     if not fit_points:
         raise SystemExit("No usable fit points found. Check --conditions, data path, velocity/error filters, or --fit-points-per-condition.")
 
@@ -670,22 +745,27 @@ def main() -> None:
             fit_sigma = float(condition_result["best_fit_value_sigma"])
             fit_parameter = str(condition_result["fit_parameter"])
             debye_length = float(best_prediction["electron_debye_radius_m"])
+            ion_screening = float(best_prediction["ion_screening_length_m"])
             yukawa_length = float(best_prediction["yukawa_screening_length_m"])
             interparticle_spacing = float(best_prediction["hydrogen_interparticle_spacing_m"])
             bmax_over_interparticle = float(best_prediction["rhomax_fraction_of_interparticle_spacing"])
             bmax_over_debye = float(best_prediction["rhomax_fraction_of_debye_length"])
+            bmax_over_ion_screening = float(best_prediction["rhomax_fraction_of_ion_screening_length"])
             bmax_over_yukawa = float(best_prediction["rhomax_fraction_of_yukawa_screening_length"])
             bmax_over_interparticle_sigma = math.nan
             bmax_over_debye_sigma = math.nan
+            bmax_over_ion_screening_sigma = math.nan
             bmax_over_yukawa_sigma = math.nan
             if np.isfinite(fit_sigma):
                 if fit_parameter == "rhomax-spacing":
                     bmax_over_interparticle_sigma = fit_sigma
                     bmax_over_debye_sigma = fit_sigma * interparticle_spacing / debye_length
+                    bmax_over_ion_screening_sigma = fit_sigma * interparticle_spacing / ion_screening
                     bmax_over_yukawa_sigma = fit_sigma * interparticle_spacing / yukawa_length
                 elif fit_parameter == "rhomax":
                     bmax_over_interparticle_sigma = fit_sigma * debye_length / interparticle_spacing
                     bmax_over_debye_sigma = fit_sigma
+                    bmax_over_ion_screening_sigma = fit_sigma * debye_length / ion_screening
                     bmax_over_yukawa_sigma = fit_sigma * debye_length / yukawa_length
             summary_rows.append(
                 {
@@ -705,16 +785,21 @@ def main() -> None:
                     "rmse_log": condition_result["rmse_log"],
                     "n_points": condition_result["n_points"],
                     "fit_points_per_condition": args.fit_points_per_condition,
-                    "fit_point_selection": "lowest acceleration_sigma / acceleration",
+                    "fit_point_selection": fit_point_selection_by_condition.get(
+                        condition, "lowest acceleration_sigma / acceleration"
+                    ),
                     "impact_parameter_upper_bound_m": best_prediction["impact_parameter_upper_bound_m"],
                     "rhomax_fraction_of_interparticle_spacing": bmax_over_interparticle,
                     "rhomax_fraction_of_interparticle_spacing_sigma": bmax_over_interparticle_sigma,
                     "rhomax_fraction_of_debye_length": bmax_over_debye,
                     "rhomax_fraction_of_debye_length_sigma": bmax_over_debye_sigma,
+                    "rhomax_fraction_of_ion_screening_length": bmax_over_ion_screening,
+                    "rhomax_fraction_of_ion_screening_length_sigma": bmax_over_ion_screening_sigma,
                     "rhomax_fraction_of_yukawa_screening_length": bmax_over_yukawa,
                     "rhomax_fraction_of_yukawa_screening_length_sigma": bmax_over_yukawa_sigma,
                     "dragbase_rhomax_fraction_of_outer_radius": best_prediction["dragbase_rhomax_fraction_of_outer_radius"],
                     "electron_debye_radius_m": debye_length,
+                    "ion_screening_length_m": ion_screening,
                     "yukawa_screening_length_m": yukawa_length,
                     "hydrogen_interparticle_spacing_m": interparticle_spacing,
                     "outer_radius_m": best_prediction["outer_radius_m"],
@@ -750,9 +835,9 @@ def main() -> None:
         print(
             f"condition {row['condition']}: best bmax/aH={float(row['rhomax_fraction_of_interparticle_spacing']):.6g} "
             f"+/- {float(row['rhomax_fraction_of_interparticle_spacing_sigma']):.3g}, "
-            f"bmax/lD={float(row['rhomax_fraction_of_debye_length']):.6g} "
-            f"+/- {float(row['rhomax_fraction_of_debye_length_sigma']):.3g}, "
-            f"bmax/lS={float(row['rhomax_fraction_of_yukawa_screening_length']):.6g} "
+            f"bmax/lion={float(row['rhomax_fraction_of_ion_screening_length']):.6g} "
+            f"+/- {float(row['rhomax_fraction_of_ion_screening_length_sigma']):.3g}, "
+            f"bmax/lY={float(row['rhomax_fraction_of_yukawa_screening_length']):.6g} "
             f"+/- {float(row['rhomax_fraction_of_yukawa_screening_length_sigma']):.3g}, "
             f"bmax={float(row['impact_parameter_upper_bound_m']):.6e} m, "
             f"fit points={row['n_points']}, RMSE(log)={float(row['rmse_log']):.4g}"
