@@ -20,10 +20,13 @@ class DragFourth:
     Z2arr = np.array([0.26,3.82,4.27,3.81],dtype=np.float64)
     gccarr =  np.array([1e-5,1,1e-5,1],dtype=np.float64)
     Tarr = np.array([5000,5000,1e5,1e5],dtype=np.float64)
-    def __init__(self,conditions,vres=100,rhores=300,ures=100):
+    def __init__(self,conditions,vres=100,rhores=300,ures=100,dphires=100,vrel_sigma_width=4.0,rhomax_fraction=0.3):
         self.vres=vres #resolution of velocity integration
         self.rhores=rhores #resolution of impact parameter integration
         self.ures = ures
+        self.dphires = dphires
+        self.vrel_sigma_width = vrel_sigma_width
+        self.rhomax_fraction = rhomax_fraction
         self.z1 = self.Z1arr[conditions]
         self.z2 = self.Z2arr[conditions]
         self.gcc = self.gccarr[conditions]
@@ -68,9 +71,11 @@ class DragFourth:
         # return newton(umaxfunc,x0=1/lD,fprime=dfdr,args=(rho,A,k0,E),maxiter=500,rtol=1e-30)
         result = np.zeros(len(rho))
         for i in range(len(rho)):
-            if self.umaxfunc(1e-6*self.ustart,rho[i],E)*self.umaxfunc(1e1/rho[i],rho[i],E)>0:
+            lower = min(1e-6*self.ustart,1e-18)
+            upper = 1e1/rho[i]
+            if self.umaxfunc(lower,rho[i],E)*self.umaxfunc(upper,rho[i],E)>0:
                 print("Root Finding Error!")
-            result[i]=brentq(self.umaxfunc,min(1e-6*self.ustart,1e-18),1e1/rho[i],args=(rho[i],E))
+            result[i]=brentq(self.umaxfunc,lower,upper,args=(rho[i],E),maxiter=1000)
         # guess = 1e8
         return result
         # return newton(umaxfunc,fprime= dumaxfunc,x0=guess,args=(rho,A,k0,E),maxiter=2000,rtol=1e-20)
@@ -101,7 +106,7 @@ class DragFourth:
     def dphi(self,rho,E): #TODO: vectorized in rho
         u0 = self.umax(rho,E) #find upper bound of u integral, vectorized in rho
         C = self.A*np.exp(-self.k0/u0) #associated with rho
-        steps = 100
+        steps = self.dphires
         frac = 1e-5
         results = np.zeros(len(u0))
         for i in range(len(rho)):
@@ -129,7 +134,7 @@ class DragFourth:
         sigmav = np.sqrt(self.kb*self.T/self.mu) #standard deviation in velocity due to thermal effects
         # for particle not starting at infinity, minium energy of particle is nonzero
         #varr is velocity at rstart
-        varr = np.linspace(vb-4*sigmav,vb+4*sigmav,self.vres)
+        varr = np.linspace(vb-self.vrel_sigma_width*sigmav,vb+self.vrel_sigma_width*sigmav,self.vres)
         rhoupcandidate = max([self.lD,self.nh**(-1/3)])
 
         #rhoarr is evenly spaced in area at starting ustart, rstart
@@ -145,9 +150,11 @@ class DragFourth:
         phiinfstart=np.zeros((self.vres,self.rhores))
         print("phi")
         for i in range(len(varr)):
+            if np.abs(varr[i]) == 0.0:
+                continue
             vinf = np.sqrt(Earr[i]/(0.5*self.mu))
             #rhoup is maximum impact parameter at infinity
-            rhoup = 0.3*np.abs(varr[i])/(vinf*self.ustart)
+            rhoup = self.rhomax_fraction*np.abs(varr[i])/(vinf*self.ustart)
             rhoarr = np.zeros(self.rhores)
             for j in range(self.rhores): #rhoarr spaced such that equal area
                 if j == 0:
@@ -163,7 +170,7 @@ class DragFourth:
             # print(np.max(alpha),np.max(phiinfstart))
             rhostart = np.sin(alpha)/self.ustart
             #2. keep trajectories with rhostart<0.4 rstart
-            maxi = np.argmin(np.abs(rhostart-0.3/self.ustart))
+            maxi = np.argmin(np.abs(rhostart-self.rhomax_fraction/self.ustart))
 
             rhostart = rhostart[:maxi]
             # print(maxi/self.rhores)
@@ -181,46 +188,42 @@ class DragFourth:
             # print(np.min(theta),np.max(theta))
             result += np.sum(rhostart*drhostart*(varr[i]*abs(varr[i]))*fvarr[i]*(1-np.cos(theta))) 
         return 2*self.pi*self.nh*self.mu*result*dv #drag force on silicon
-vb = 1e4
-y = np.zeros(4)
-y_head = np.zeros(4)
-y_sigma = np.zeros(4)
-"""
-#let phifree be angle between rstart and finite impact parameter at rstart, rhostart
-#rhostart is distance of closest approach if test particle was let go at rstart with no force
-#let phi be angle between infinity (parallel to velocity at rstart) and point of closest approach for force, particle starts at rstart
-#during trajectory from rstart to point of closest approach, velocity deflection is pi/2-phi
+if __name__ == "__main__":
+    vb = 1e4
+    y = np.zeros(4)
+    y_head = np.zeros(4)
+    y_sigma = np.zeros(4)
+    """
+    #let phifree be angle between rstart and finite impact parameter at rstart, rhostart
+    #rhostart is distance of closest approach if test particle was let go at rstart with no force
+    #let phi be angle between infinity (parallel to velocity at rstart) and point of closest approach for force, particle starts at rstart
+    #during trajectory from rstart to point of closest approach, velocity deflection is pi/2-phi
 
-My approach will be 
-1. evolve trajectoriess from infinity using phicutoff, 
-    evaluate to rstart, integrate yukawa phi
-    phicutoff is angle between velocity at infinity and particle position at rstart.
-2. At rstart, calculate angle of velocity using conservation of angular momentum
-3. keep trajectories that have impact parameter calculated using
-    position and velocity of rstart under 0.4*rstart
-4. For these selected trajectories, consider velocity direction 
-    difference between rstart and r closest approach
+    My approach will be
+    1. evolve trajectoriess from infinity using phicutoff,
+        evaluate to rstart, integrate yukawa phi
+        phicutoff is angle between velocity at infinity and particle position at rstart.
+    2. At rstart, calculate angle of velocity using conservation of angular momentum
+    3. keep trajectories that have impact parameter calculated using
+        position and velocity of rstart under 0.4*rstart
+    4. For these selected trajectories, consider velocity direction
+        difference between rstart and r closest approach
+    """
 
+    #velocity deflection from finit
 
+    for i in range(4):
+        calcdrag = DragFourth(i)
+        y[i] = calcdrag.drag(vb)
+        # y_head[i] = calcdrag.drag_head_on(vb)
+        # y_sigma[i] = calcdrag.sigma_transport(vb)
 
+    out = np.zeros((4, 3))
+    out[:, 0] = y_sigma
+    out[:, 1] = y
+    out[:, 2] = y_head
 
-
-"""
-
-#velocity deflection from finit
-
-for i in range(4):
-    calcdrag = DragFourth(i)
-    y[i] = calcdrag.drag(vb)
-    # y_head[i] = calcdrag.drag_head_on(vb)
-    # y_sigma[i] = calcdrag.sigma_transport(vb)
-
-out = np.zeros((4, 3))
-out[:, 0] = y_sigma
-out[:, 1] = y
-out[:, 2] = y_head
-
-np.save("theory_interparticle_max_{:.1e}".format(vb), out)
-print("Saved columns: sigma_transport [m^2], drag [N], drag_head_on [N]")
-print("Fully Successful")
-print(y)
+    np.save("theory_interparticle_max_{:.1e}".format(vb), out)
+    print("Saved columns: sigma_transport [m^2], drag [N], drag_head_on [N]")
+    print("Fully Successful")
+    print(y)

@@ -44,6 +44,8 @@ variable wp equal $(sqrt(v_ne*(v_qe^2)/(v_me*v_e0)))
 variable lD equal $(v_ve/v_wp) #debye lengtyh
 variable lD_cm equal $(100*v_lD)
 variable a_cm equal $((v_vol/(v_NH+v_NSi))^(1.0/3.0)) #interactomic spacing cm
+#use sc
+
 if "$(v_a_cm) >= $(v_lD_cm)" then "variable rc_cm equal $(2*v_a_cm)"
 if "$(v_a_cm) < $(v_lD_cm)" then "variable rc_cm equal $(2*v_lD_cm)"
 

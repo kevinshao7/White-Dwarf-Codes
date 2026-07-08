@@ -9,7 +9,7 @@ variable rhoH equal 1.00000e-05
 variable rhoS equal 1.79000e-04 #gcc
 variable ZH equal 1.60000e-01
 variable ZSi equal 2.60000e-01
-variable ccs equal 5.45556e-17 #collision cross section in cm^2
+variable ccs equal 5.68720e-17 #collision cross section in cm^2
 variable dtfrac equal 1e-3
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
@@ -41,11 +41,9 @@ variable dtdens equal $(0.01*v_side/((v_vthh+v_vb)*((v_NH+v_NSi)^(1/3))))
 variable ne equal $(1e6*v_avogadro*v_ZH*v_rhoH/1.008) #electron number density SI
 variable ve equal $(sqrt(3*v_kb*v_T0/v_me))
 variable wp equal $(sqrt(v_ne*(v_qe^2)/(v_me*v_e0)))
-variable lD equal $(v_ve/v_wp) #debye lengtyh
+variable lD equal $(v_ve/v_wp) #debye length
 variable lD_cm equal $(100*v_lD)
 variable a_cm equal $((v_vol/(v_NH+v_NSi))^(1.0/3.0)) #interactomic spacing cm
-if "$(v_a_cm) >= $(v_lD_cm)" then "variable rc_cm equal $(2*v_a_cm)"
-if "$(v_a_cm) < $(v_lD_cm)" then "variable rc_cm equal $(2*v_lD_cm)"
 
 
 
@@ -55,6 +53,11 @@ variable k0 equal $(1/(100*v_lS)) #screening length in cm^-1
 variable dtscreen equal $(v_dtfrac/((v_vthh+v_vb)*v_k0))
 if "$(v_dtdens) >= $(v_dtscreen)" then "variable dt equal $(v_dtscreen)"
 if "$(v_dtdens) < $(v_dtscreen)" then "variable dt equal $(v_dtdens)"
+
+#use screening length for cutoff, not interparticle spacing
+variable rc_cm equal $(300*v_lS) #cutoff is in centimeters, two times screening length
+#if "$(v_a_cm) >= $(v_lD_cm)" then "variable rc_cm equal $(2*v_a_cm)"
+#if "$(v_a_cm) < $(v_lD_cm)" then "variable rc_cm equal $(2*v_lD_cm)"
 
 #---------------initialization------------------
 units cgs #mass: gram, distangce:centimeters, time:sec temp: Kelvin

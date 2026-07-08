@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=standard --time 1:00:00 
+#SBATCH --partition=standard --time 2:00:00 
 #SBATCH --mail-type=END
 #SBATCH --mail-user=ks2120@cam.ac.uk
 #SBATCH -n 40
