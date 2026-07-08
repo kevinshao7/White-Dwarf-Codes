@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CM_PER_S_TO_M_PER_S, condition_label, make_drag, quiet_drag, write_csv
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-WEAKLY_COUPLED_CONDITIONS = (0, 2)
-COUPLING_PARAMETER = {0: 0.03, 2: 0.42}
+ALL_CONDITIONS = (0, 1, 2, 3)
+COUPLING_PARAMETER = {0: 0.03, 1: 1.94, 2: 0.42, 3: 1.05}
 
 
 @dataclass(frozen=True)
@@ -168,6 +168,8 @@ def make_drag_for_fit(
     ures: int,
     dphires: int,
 ):
+    if fit_parameter == "rhomax-spacing":
+        return make_drag(condition, vres=vres, rhores=rhores, ures=ures, dphires=dphires, rhomax_fraction=fit_value)
     if fit_parameter == "rhomax":
         probe = make_drag(condition, vres=vres, rhores=rhores, ures=ures, dphires=dphires)
         return make_drag(
@@ -184,17 +186,19 @@ def make_drag_for_fit(
 
 
 def prediction_metadata(drag, fit_value: float, fit_parameter: str) -> dict[str, float]:
-    rhomax_fraction_of_debye_length = fit_value if fit_parameter == "rhomax" else math.nan
     yukawa_screening_length_m = 1.0 / drag.k0
     impact_parameter_upper_bound_m = drag.rhomax_fraction / drag.ustart
+    interparticle_spacing_m = 1.0 / drag.ustart
     return {
-        "rhomax_fraction_of_debye_length": rhomax_fraction_of_debye_length,
+        "rhomax_fraction_of_interparticle_spacing": float(impact_parameter_upper_bound_m / interparticle_spacing_m),
+        "rhomax_fraction_of_debye_length": float(impact_parameter_upper_bound_m / drag.lD),
         "rhomax_fraction_of_yukawa_screening_length": float(impact_parameter_upper_bound_m / yukawa_screening_length_m),
         "dragbase_rhomax_fraction_of_outer_radius": float(drag.rhomax_fraction),
         "electron_debye_radius_m": float(drag.lD),
         "yukawa_screening_length_m": float(yukawa_screening_length_m),
         "impact_parameter_upper_bound_m": float(impact_parameter_upper_bound_m),
         "outer_radius_m": float(1.0 / drag.ustart),
+        "hydrogen_interparticle_spacing_m": float(interparticle_spacing_m),
     }
 
 
@@ -234,67 +238,6 @@ def run_fit_point_case(task: tuple[int, float, str, DataPoint, int, int, int, in
         "weighted_log_residual": weighted_log_residual,
         **prediction_metadata(drag, fit_value, fit_parameter),
     }
-
-
-def model_rows_for_fit_value(
-    condition: int,
-    fit_value: float,
-    fit_parameter: str,
-    points: list[DataPoint],
-    vres: int,
-    rhores: int,
-    ures: int,
-    dphires: int,
-    progress: bool,
-    eval_index: int,
-) -> tuple[list[dict[str, object]], np.ndarray]:
-    rows = []
-    weighted_residuals = []
-    label = fit_value_label(fit_parameter)
-    drag = make_drag_for_fit(condition, fit_value, fit_parameter, vres, rhores, ures, dphires)
-    metadata = prediction_metadata(drag, fit_value, fit_parameter)
-    for point_index, point in enumerate(points, start=1):
-        force_n = quiet_drag(drag, point.velocity_cm_s * CM_PER_S_TO_M_PER_S)
-        model_acceleration = abs(force_n / drag.ms) * 100.0
-        log_residual = math.nan
-        weighted_log_residual = math.nan
-        if model_acceleration > 0.0 and point.acceleration_cm_s2 > 0.0:
-            log_residual = math.log(model_acceleration) - math.log(point.acceleration_cm_s2)
-            if np.isfinite(point.acceleration_sigma_cm_s2):
-                sigma_log = max(point.acceleration_sigma_cm_s2 / point.acceleration_cm_s2, 0.05)
-                weighted_log_residual = log_residual / sigma_log
-            else:
-                weighted_log_residual = log_residual
-        rows.append(
-            {
-                "condition": condition,
-                "fit_parameter": fit_parameter,
-                "fit_value": fit_value,
-                "velocity_cm_s": point.velocity_cm_s,
-                "velocity_m_s": point.velocity_cm_s * CM_PER_S_TO_M_PER_S,
-                "data_acceleration_cm_s2": point.acceleration_cm_s2,
-                "data_acceleration_sigma_cm_s2": point.acceleration_sigma_cm_s2,
-                "model_acceleration_cm_s2": model_acceleration,
-                "drag_N": force_n,
-                "source": point.source,
-                "status": "ok",
-                "error": "",
-                "log_residual": log_residual,
-                "weighted_log_residual": weighted_log_residual,
-                **metadata,
-            }
-        )
-        progress_print(
-            progress,
-            "[residual] "
-            f"condition={condition} {label}={fit_value:.6g} eval={eval_index} "
-            f"point={point_index}/{len(points)} "
-            f"v={point.velocity_cm_s:.6e} cm/s "
-            f"data={point.acceleration_cm_s2:.6e} model={model_acceleration:.6e} cm/s^2 "
-            f"log_residual={log_residual:.6g} weighted={weighted_log_residual:.6g}",
-        )
-        weighted_residuals.append(weighted_log_residual if np.isfinite(weighted_log_residual) else 1.0e30)
-    return rows, np.array(weighted_residuals, dtype=float)
 
 
 def covariance_sigma(result, n_points: int) -> float:
@@ -462,220 +405,6 @@ def evaluate_fit_parallel(
     }
 
 
-def covariance_sigmas(result, n_points: int) -> np.ndarray:
-    if result.jac is None or result.jac.size == 0:
-        return np.full(len(result.x), math.nan, dtype=float)
-    dof = max(1, n_points - len(result.x))
-    reduced_chi2 = float(np.sum(np.square(result.fun)) / dof)
-    try:
-        cov = np.linalg.inv(result.jac.T @ result.jac) * reduced_chi2
-    except np.linalg.LinAlgError:
-        return np.full(len(result.x), math.nan, dtype=float)
-    variances = np.diag(cov)
-    return np.array([math.sqrt(float(value)) if value >= 0.0 and np.isfinite(value) else math.nan for value in variances])
-
-
-def evaluate_conditions_parallel(
-    pool: ProcessPoolExecutor,
-    points_by_condition: dict[int, list[DataPoint]],
-    initial: float,
-    fit_min: float,
-    fit_max: float,
-    fit_parameter: str,
-    vres: int,
-    rhores: int,
-    ures: int,
-    dphires: int,
-    max_nfev: int,
-    progress: bool,
-) -> list[dict[str, object]]:
-    ordered_conditions = sorted(condition for condition, points in points_by_condition.items() if points)
-    condition_to_index = {condition: index for index, condition in enumerate(ordered_conditions)}
-    clipped_initial = min(max(initial, fit_min), fit_max)
-    eval_counter = 0
-    label = fit_value_label(fit_parameter)
-    progress_print(
-        progress,
-        f"[fit start] combined_conditions={ordered_conditions} {label}_initial={clipped_initial:.6g} "
-        f"bounds=({fit_min:.6g}, {fit_max:.6g}) residual_points={sum(len(points_by_condition[c]) for c in ordered_conditions)} "
-        f"parallel_drag_workers={pool._max_workers}",
-    )
-
-    def rows_for_params(params: np.ndarray, eval_index: int) -> tuple[list[dict[str, object]], np.ndarray]:
-        tasks = []
-        for condition in ordered_conditions:
-            fit_value = float(params[condition_to_index[condition]])
-            for point in points_by_condition[condition]:
-                tasks.append((condition, fit_value, fit_parameter, point, vres, rhores, ures, dphires))
-        rows = list(pool.map(run_fit_point_case, tasks))
-        residuals = []
-        for row_index, row in enumerate(rows, start=1):
-            condition = int(row["condition"])
-            fit_value = float(row["fit_value"])
-            progress_print(
-                progress,
-                "[residual] "
-                f"condition={condition} {label}={fit_value:.6g} eval={eval_index} "
-                f"point={row_index}/{len(rows)} "
-                f"v={float(row['velocity_cm_s']):.6e} cm/s "
-                f"data={float(row['data_acceleration_cm_s2']):.6e} "
-                f"model={float(row['model_acceleration_cm_s2']):.6e} cm/s^2 "
-                f"log_residual={float(row['log_residual']):.6g} weighted={float(row['weighted_log_residual']):.6g}",
-            )
-            weighted_residual = float(row["weighted_log_residual"])
-            residuals.append(weighted_residual if np.isfinite(weighted_residual) else 1.0e30)
-        return rows, np.array(residuals, dtype=float)
-
-    def residual_vector(params: np.ndarray) -> np.ndarray:
-        nonlocal eval_counter
-        eval_counter += 1
-        try:
-            _, residuals = rows_for_params(params, eval_counter)
-            return residuals
-        except Exception as exc:
-            progress_print(progress, f"[fit eval failed] params={params} error={exc!r}")
-            return np.full(sum(len(points_by_condition[c]) for c in ordered_conditions), 1.0e30, dtype=float)
-
-    result = least_squares(
-        residual_vector,
-        x0=np.full(len(ordered_conditions), clipped_initial, dtype=float),
-        bounds=(np.full(len(ordered_conditions), fit_min, dtype=float), np.full(len(ordered_conditions), fit_max, dtype=float)),
-        x_scale="jac",
-        max_nfev=max_nfev,
-    )
-    final_rows, final_weighted_residuals = rows_for_params(result.x, eval_counter + 1)
-    sigmas = covariance_sigmas(result, len(final_weighted_residuals))
-    fit_results = []
-    for condition in ordered_conditions:
-        condition_rows = [row for row in final_rows if int(row["condition"]) == condition]
-        weighted = np.array([float(row["weighted_log_residual"]) for row in condition_rows], dtype=float)
-        log_residuals = np.array([float(row["log_residual"]) for row in condition_rows if np.isfinite(row["log_residual"])], dtype=float)
-        fit_value = float(result.x[condition_to_index[condition]])
-        sigma = float(sigmas[condition_to_index[condition]])
-        progress_print(
-            progress,
-            f"[fit done] condition={condition} {label}={fit_value:.6g} sigma={sigma:.6g} "
-            f"score={float(np.mean(np.square(weighted))):.6g} "
-            f"rmse_log={float(np.sqrt(np.mean(np.square(log_residuals)))):.6g} nfev={result.nfev} success={result.success}",
-        )
-        fit_results.append(
-            {
-                "condition": condition,
-                "fit_value": fit_value,
-                "fit_parameter": fit_parameter,
-                "score": float(np.mean(np.square(weighted))) if len(weighted) else math.nan,
-                "rmse_log": float(np.sqrt(np.mean(np.square(log_residuals)))) if len(log_residuals) else math.nan,
-                "n_points": len(weighted),
-                "best_fit_value_sigma": sigma,
-                "optimizer_success": bool(result.success),
-                "optimizer_message": str(result.message),
-                "optimizer_nfev": int(result.nfev),
-                "prediction_rows": condition_rows,
-            }
-        )
-    return fit_results
-
-
-def evaluate_fit(task: tuple[int, float, float, float, str, list[DataPoint], int, int, int, int, int, bool]) -> dict[str, object]:
-    condition, initial, fit_min, fit_max, fit_parameter, points, vres, rhores, ures, dphires, max_nfev, progress = task
-    label = fit_value_label(fit_parameter)
-    eval_counter = 0
-    clipped_initial = min(max(initial, fit_min), fit_max)
-    progress_print(
-        progress,
-        f"[fit start] condition={condition} {label}_initial={clipped_initial:.6g} bounds=({fit_min:.6g}, {fit_max:.6g}) points={len(points)}",
-    )
-
-    def residual_vector(params: np.ndarray) -> np.ndarray:
-        nonlocal eval_counter
-        eval_counter += 1
-        fit_value = float(params[0])
-        try:
-            _, residuals = model_rows_for_fit_value(
-                condition,
-                fit_value,
-                fit_parameter,
-                points,
-                vres,
-                rhores,
-                ures,
-                dphires,
-                progress,
-                eval_counter,
-            )
-            return residuals
-        except Exception as exc:
-            progress_print(progress, f"[fit eval failed] condition={condition} {label}={fit_value:.6g} error={exc!r}")
-            return np.full(len(points), 1.0e30, dtype=float)
-
-    try:
-        result = least_squares(
-            residual_vector,
-            x0=np.array([clipped_initial], dtype=float),
-            bounds=(np.array([fit_min], dtype=float), np.array([fit_max], dtype=float)),
-            x_scale="jac",
-            max_nfev=max_nfev,
-        )
-        best_value = float(result.x[0])
-        prediction_rows, weighted_residuals = model_rows_for_fit_value(
-            condition,
-            best_value,
-            fit_parameter,
-            points,
-            vres,
-            rhores,
-            ures,
-            dphires,
-            progress,
-            eval_counter + 1,
-        )
-        log_residuals = np.array([float(row["log_residual"]) for row in prediction_rows if np.isfinite(row["log_residual"])], dtype=float)
-    except Exception as exc:
-        progress_print(progress, f"[fit failed] condition={condition} error={exc!r}")
-        return {
-            "condition": condition,
-            "fit_value": math.nan,
-            "fit_parameter": fit_parameter,
-            "score": math.nan,
-            "rmse_log": math.nan,
-            "n_points": 0,
-            "best_fit_value_sigma": math.nan,
-            "optimizer_success": False,
-            "optimizer_message": repr(exc),
-            "optimizer_nfev": eval_counter,
-            "prediction_rows": [
-                {
-                    "condition": condition,
-                    "fit_parameter": fit_parameter,
-                    "status": "failed",
-                    "error": repr(exc),
-                }
-            ],
-        }
-
-    score = float(np.mean(np.square(weighted_residuals))) if len(weighted_residuals) else math.nan
-    rmse_log = float(np.sqrt(np.mean(np.square(log_residuals)))) if len(log_residuals) else math.nan
-    sigma = covariance_sigma(result, len(weighted_residuals))
-    progress_print(
-        progress,
-        f"[fit done] condition={condition} {label}={best_value:.6g} sigma={sigma:.6g} "
-        f"score={score:.6g} rmse_log={rmse_log:.6g} nfev={result.nfev} success={result.success}",
-    )
-    return {
-        "condition": condition,
-        "fit_value": best_value,
-        "fit_parameter": fit_parameter,
-        "score": score,
-        "rmse_log": rmse_log,
-        "n_points": len(weighted_residuals),
-        "best_fit_value_sigma": sigma,
-        "optimizer_success": bool(result.success),
-        "optimizer_message": str(result.message),
-        "optimizer_nfev": int(result.nfev),
-        "prediction_rows": prediction_rows,
-    }
-
-
 def run_curve_case(task: tuple[int, float, str, float, int, int, int, int, bool]) -> dict[str, float | int | str]:
     condition, fit_value, fit_parameter, velocity_cm_s, vres, rhores, ures, dphires, progress = task
     label = fit_value_label(fit_parameter)
@@ -715,7 +444,11 @@ def run_curve_case(task: tuple[int, float, str, float, int, int, int, int, bool]
 
 
 def fit_value_label(fit_parameter: str) -> str:
-    return "bmax/lD" if fit_parameter == "rhomax" else fit_parameter
+    if fit_parameter == "rhomax-spacing":
+        return "bmax/aH"
+    if fit_parameter == "rhomax":
+        return "bmax/lD"
+    return fit_parameter
 
 
 def format_uncertainty(value: float, lower: object, upper: object) -> str:
@@ -740,7 +473,7 @@ def plot_results(
     fit_parameter: str,
 ) -> None:
     conditions = sorted({point.condition for point in all_points})
-    colors = {0: "red", 2: "green"}
+    colors = {0: "red", 1: "orange", 2: "green", 3: "blue"}
     fig, ax = plt.subplots(figsize=(12, 8))
     for condition in conditions:
         color = colors.get(condition, None)
@@ -781,6 +514,8 @@ def plot_results(
             linewidth=2,
             label=(
                 f"condition {condition}, Gamma={COUPLING_PARAMETER.get(condition, math.nan):.2g}, "
+                f"bmax/aH="
+                f"{format_uncertainty(float(best['rhomax_fraction_of_interparticle_spacing']), best.get('rhomax_fraction_of_interparticle_spacing_sigma'), best.get('rhomax_fraction_of_interparticle_spacing_sigma'))}, "
                 f"bmax/lD="
                 f"{format_uncertainty(float(best['rhomax_fraction_of_debye_length']), best.get('rhomax_fraction_of_debye_length_sigma'), best.get('rhomax_fraction_of_debye_length_sigma'))}, "
                 f"bmax/lS="
@@ -848,13 +583,16 @@ def condition_curve_velocities(points: list[DataPoint], n_curve: int) -> dict[in
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--conditions", nargs="+", type=int, default=list(WEAKLY_COUPLED_CONDITIONS))
+    parser.add_argument("--conditions", nargs="+", type=int, default=list(ALL_CONDITIONS))
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
         "--fit-parameter",
-        choices=["rhomax", "outer-radius"],
-        default="rhomax",
-        help="rhomax fits bmax/lD; outer-radius fits the starting radius relative to the default interparticle spacing.",
+        choices=["rhomax-spacing", "rhomax", "outer-radius"],
+        default="rhomax-spacing",
+        help=(
+            "rhomax-spacing fits bmax/aH, where aH is the hydrogen interparticle spacing; "
+            "rhomax fits bmax/lD; outer-radius fits the starting radius relative to the default interparticle spacing."
+        ),
     )
     parser.add_argument("--fit-min", type=float, default=0.03)
     parser.add_argument("--fit-max", type=float, default=1.0)
@@ -866,8 +604,8 @@ def main() -> None:
     parser.add_argument(
         "--fit-points-per-condition",
         type=int,
-        default=4,
-        help="Number of lowest-relative-acceleration-error data points to fit for each weakly coupled condition.",
+        default=8,
+        help="Number of lowest-relative-acceleration-error data points to fit for each condition.",
     )
     parser.add_argument("--min-velocity-cm-s", type=float, default=1.0e2)
     parser.add_argument("--max-velocity-cm-s", type=float, default=1.0e8)
@@ -883,9 +621,9 @@ def main() -> None:
         raise SystemExit("--fit-min and --fit-max must be positive with fit-min < fit-max.")
 
     requested_conditions = set(args.conditions)
-    non_weak_conditions = requested_conditions.difference(WEAKLY_COUPLED_CONDITIONS)
-    if non_weak_conditions:
-        raise SystemExit(f"This fitter is restricted to weakly coupled condition indexes 0 and 2; got {sorted(non_weak_conditions)}.")
+    unknown_conditions = requested_conditions.difference(ALL_CONDITIONS)
+    if unknown_conditions:
+        raise SystemExit(f"Unknown condition indexes {sorted(unknown_conditions)}; valid conditions are {list(ALL_CONDITIONS)}.")
 
     if args.data_csv:
         all_points = load_points_from_csv(args.data_csv, requested_conditions)
@@ -902,20 +640,25 @@ def main() -> None:
     }
     fit_initial = args.fit_initial if args.fit_initial is not None else math.sqrt(args.fit_min * args.fit_max)
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        fit_results = evaluate_conditions_parallel(
-            pool,
-            points_by_condition,
-            fit_initial,
-            args.fit_min,
-            args.fit_max,
-            args.fit_parameter,
-            args.vres,
-            args.rhores,
-            args.ures,
-            args.dphires,
-            args.max_fit_evaluations,
-            not args.quiet,
-        )
+        fit_results = [
+            evaluate_fit_parallel(
+                pool,
+                condition,
+                fit_initial,
+                args.fit_min,
+                args.fit_max,
+                args.fit_parameter,
+                points,
+                args.vres,
+                args.rhores,
+                args.ures,
+                args.dphires,
+                args.max_fit_evaluations,
+                not args.quiet,
+            )
+            for condition, points in sorted(points_by_condition.items())
+            if points
+        ]
 
         prediction_rows = [row for result in fit_results for row in result["prediction_rows"]]
         summary_rows: list[dict[str, object]] = []
@@ -925,16 +668,31 @@ def main() -> None:
                 continue
             best_prediction = next(row for row in condition_result["prediction_rows"] if row["status"] == "ok")
             fit_sigma = float(condition_result["best_fit_value_sigma"])
+            fit_parameter = str(condition_result["fit_parameter"])
             debye_length = float(best_prediction["electron_debye_radius_m"])
             yukawa_length = float(best_prediction["yukawa_screening_length_m"])
+            interparticle_spacing = float(best_prediction["hydrogen_interparticle_spacing_m"])
+            bmax_over_interparticle = float(best_prediction["rhomax_fraction_of_interparticle_spacing"])
+            bmax_over_debye = float(best_prediction["rhomax_fraction_of_debye_length"])
             bmax_over_yukawa = float(best_prediction["rhomax_fraction_of_yukawa_screening_length"])
-            bmax_over_yukawa_sigma = fit_sigma * debye_length / yukawa_length if np.isfinite(fit_sigma) else math.nan
+            bmax_over_interparticle_sigma = math.nan
+            bmax_over_debye_sigma = math.nan
+            bmax_over_yukawa_sigma = math.nan
+            if np.isfinite(fit_sigma):
+                if fit_parameter == "rhomax-spacing":
+                    bmax_over_interparticle_sigma = fit_sigma
+                    bmax_over_debye_sigma = fit_sigma * interparticle_spacing / debye_length
+                    bmax_over_yukawa_sigma = fit_sigma * interparticle_spacing / yukawa_length
+                elif fit_parameter == "rhomax":
+                    bmax_over_interparticle_sigma = fit_sigma * debye_length / interparticle_spacing
+                    bmax_over_debye_sigma = fit_sigma
+                    bmax_over_yukawa_sigma = fit_sigma * debye_length / yukawa_length
             summary_rows.append(
                 {
                     "condition": condition,
                     "condition_label": condition_label(condition),
                     "coupling_parameter": COUPLING_PARAMETER.get(condition, math.nan),
-                    "fit_parameter": args.fit_parameter,
+                    "fit_parameter": fit_parameter,
                     "best_fit_value": condition_result["fit_value"],
                     "best_fit_value_sigma": fit_sigma,
                     "best_fit_value_err_minus": fit_sigma,
@@ -949,13 +707,16 @@ def main() -> None:
                     "fit_points_per_condition": args.fit_points_per_condition,
                     "fit_point_selection": "lowest acceleration_sigma / acceleration",
                     "impact_parameter_upper_bound_m": best_prediction["impact_parameter_upper_bound_m"],
-                    "rhomax_fraction_of_debye_length": best_prediction["rhomax_fraction_of_debye_length"],
-                    "rhomax_fraction_of_debye_length_sigma": fit_sigma,
+                    "rhomax_fraction_of_interparticle_spacing": bmax_over_interparticle,
+                    "rhomax_fraction_of_interparticle_spacing_sigma": bmax_over_interparticle_sigma,
+                    "rhomax_fraction_of_debye_length": bmax_over_debye,
+                    "rhomax_fraction_of_debye_length_sigma": bmax_over_debye_sigma,
                     "rhomax_fraction_of_yukawa_screening_length": bmax_over_yukawa,
                     "rhomax_fraction_of_yukawa_screening_length_sigma": bmax_over_yukawa_sigma,
                     "dragbase_rhomax_fraction_of_outer_radius": best_prediction["dragbase_rhomax_fraction_of_outer_radius"],
                     "electron_debye_radius_m": debye_length,
                     "yukawa_screening_length_m": yukawa_length,
+                    "hydrogen_interparticle_spacing_m": interparticle_spacing,
                     "outer_radius_m": best_prediction["outer_radius_m"],
                 }
             )
@@ -987,7 +748,9 @@ def main() -> None:
 
     for row in summary_rows:
         print(
-            f"condition {row['condition']}: best bmax/lD={float(row['rhomax_fraction_of_debye_length']):.6g} "
+            f"condition {row['condition']}: best bmax/aH={float(row['rhomax_fraction_of_interparticle_spacing']):.6g} "
+            f"+/- {float(row['rhomax_fraction_of_interparticle_spacing_sigma']):.3g}, "
+            f"bmax/lD={float(row['rhomax_fraction_of_debye_length']):.6g} "
             f"+/- {float(row['rhomax_fraction_of_debye_length_sigma']):.3g}, "
             f"bmax/lS={float(row['rhomax_fraction_of_yukawa_screening_length']):.6g} "
             f"+/- {float(row['rhomax_fraction_of_yukawa_screening_length_sigma']):.3g}, "
