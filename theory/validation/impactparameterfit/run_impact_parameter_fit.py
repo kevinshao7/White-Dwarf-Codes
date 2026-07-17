@@ -173,6 +173,24 @@ def campaign_velocity(campaign_points: list[DataPoint]) -> float:
     return max(point.velocity_cm_s for point in campaign_points)
 
 
+def select_campaigns_near_targets(
+    campaigns: dict[int, list[DataPoint]],
+    targets: np.ndarray,
+) -> list[list[DataPoint]]:
+    candidates = dict(campaigns)
+    selected: list[list[DataPoint]] = []
+    for target in targets:
+        if not candidates:
+            break
+        campaign_id, campaign_points = min(
+            candidates.items(),
+            key=lambda item: abs(math.log(campaign_velocity(item[1]) / target)),
+        )
+        selected.append(campaign_points)
+        del candidates[campaign_id]
+    return selected
+
+
 def select_log_spaced_campaign_points(
     points: list[DataPoint],
     count: int,
@@ -191,17 +209,45 @@ def select_log_spaced_campaign_points(
     if len(candidates) < count:
         candidates = campaigns
 
-    selected_campaigns: list[list[DataPoint]] = []
     targets = np.geomspace(min_velocity_cm_s, max_velocity_cm_s, count)
-    for target in targets:
-        campaign_id, campaign_points = min(
-            candidates.items(),
-            key=lambda item: abs(math.log(campaign_velocity(item[1]) / target)),
-        )
-        selected_campaigns.append(campaign_points)
-        del candidates[campaign_id]
-        if not candidates:
-            break
+    selected_campaigns = select_campaigns_near_targets(candidates, targets)
+
+    selected = [lowest_relative_error_points(campaign_points, 1)[0] for campaign_points in selected_campaigns]
+    return sorted(selected, key=lambda point: point.velocity_cm_s)
+
+
+def select_condition_3_campaign_points(points: list[DataPoint], count: int) -> list[DataPoint]:
+    campaigns = group_points_by_lammps_campaign(points)
+    if len(campaigns) < count:
+        return lowest_relative_error_points(points, count)
+
+    low_count = min(6, count)
+    high_count = max(0, count - low_count)
+    low_campaigns = {
+        campaign_id: campaign_points
+        for campaign_id, campaign_points in campaigns.items()
+        if 1.0e5 <= campaign_velocity(campaign_points) <= 2.0e6
+    }
+    if len(low_campaigns) < low_count:
+        return select_log_spaced_campaign_points(points, count)
+
+    selected_campaigns = select_campaigns_near_targets(
+        low_campaigns,
+        np.geomspace(1.0e5, 2.0e6, low_count),
+    )
+    selected_ids = {
+        campaign_id
+        for campaign_id, campaign_points in campaigns.items()
+        if campaign_points in selected_campaigns
+    }
+    high_campaigns = {
+        campaign_id: campaign_points
+        for campaign_id, campaign_points in campaigns.items()
+        if campaign_id not in selected_ids and 2.0e6 < campaign_velocity(campaign_points) <= 1.0e8
+    }
+    selected_campaigns.extend(
+        select_campaigns_near_targets(high_campaigns, np.geomspace(2.0e6, 1.0e8, high_count))
+    )
 
     selected = [lowest_relative_error_points(campaign_points, 1)[0] for campaign_points in selected_campaigns]
     return sorted(selected, key=lambda point: point.velocity_cm_s)
@@ -213,11 +259,19 @@ def select_fit_points(points: list[DataPoint], points_per_condition: int) -> tup
     for condition in sorted({point.condition for point in points}):
         group = [point for point in points if point.condition == condition]
         if condition in STRONGLY_COUPLED_CONDITIONS:
-            condition_points = select_log_spaced_campaign_points(group, points_per_condition)
+            if condition == 3:
+                condition_points = select_condition_3_campaign_points(group, points_per_condition)
+            else:
+                condition_points = select_log_spaced_campaign_points(group, points_per_condition)
             if len({lammps_campaign_id(point) for point in condition_points if lammps_campaign_id(point) is not None}) == len(condition_points):
-                descriptions[condition] = (
-                    "lowest acceleration_sigma / acceleration point from roughly log-spaced LAMMPS campaigns between 1e5 and 1e8 cm/s"
-                )
+                if condition == 3:
+                    descriptions[condition] = (
+                        "lowest acceleration_sigma / acceleration point from LAMMPS campaigns, with 6 of 8 from 1e5-2e6 cm/s"
+                    )
+                else:
+                    descriptions[condition] = (
+                        "lowest acceleration_sigma / acceleration point from roughly log-spaced LAMMPS campaigns between 1e5 and 1e8 cm/s"
+                    )
             else:
                 descriptions[condition] = "lowest acceleration_sigma / acceleration"
         else:
@@ -280,6 +334,14 @@ def prediction_metadata(drag, fit_value: float, fit_parameter: str) -> dict[str,
 def progress_print(enabled: bool, message: str) -> None:
     if enabled:
         print(message, flush=True)
+
+
+def default_fit_initial(fit_min: float, fit_max: float) -> float:
+    if fit_min > 0.0 and np.isfinite(fit_max):
+        return math.sqrt(fit_min * fit_max)
+    if fit_min == 0.0 and np.isfinite(fit_max):
+        return 0.5 * fit_max
+    return max(1.0, fit_min if np.isfinite(fit_min) else 1.0)
 
 
 def run_fit_point_case(task: tuple[int, float, str, DataPoint, int, int, int, int]) -> dict[str, object]:
@@ -669,9 +731,14 @@ def main() -> None:
             "rhomax fits bmax/lD; outer-radius fits the starting radius relative to the default interparticle spacing."
         ),
     )
-    parser.add_argument("--fit-min", type=float, default=0.03)
-    parser.add_argument("--fit-max", type=float, default=1.0)
-    parser.add_argument("--fit-initial", type=float, default=None, help="Initial guess for the fitted cutoff; defaults to sqrt(fit-min * fit-max).")
+    parser.add_argument("--fit-min", type=float, default=0.0)
+    parser.add_argument("--fit-max", type=float, default=math.inf)
+    parser.add_argument(
+        "--fit-initial",
+        type=float,
+        default=None,
+        help="Initial guess for the fitted cutoff; defaults to 1 for the unbounded fit.",
+    )
     parser.add_argument("--max-fit-evaluations", type=int, default=20)
     parser.add_argument("--data-csv", type=Path)
     parser.add_argument("--lammps-results", type=Path, default=REPO_ROOT / "unforced" / "dataarchive" / "nprun4_29" / "results.npy")
@@ -692,8 +759,8 @@ def main() -> None:
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
     args = parser.parse_args()
-    if args.fit_min <= 0.0 or args.fit_max <= 0.0 or args.fit_min >= args.fit_max:
-        raise SystemExit("--fit-min and --fit-max must be positive with fit-min < fit-max.")
+    if args.fit_min < 0.0 or args.fit_max <= args.fit_min:
+        raise SystemExit("--fit-min must be >= 0 and --fit-max must be greater than --fit-min.")
 
     requested_conditions = set(args.conditions)
     unknown_conditions = requested_conditions.difference(ALL_CONDITIONS)
@@ -713,7 +780,7 @@ def main() -> None:
         condition: [point for point in fit_points if point.condition == condition]
         for condition in sorted(requested_conditions)
     }
-    fit_initial = args.fit_initial if args.fit_initial is not None else math.sqrt(args.fit_min * args.fit_max)
+    fit_initial = args.fit_initial if args.fit_initial is not None else default_fit_initial(args.fit_min, args.fit_max)
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         fit_results = [
             evaluate_fit_parallel(
