@@ -91,7 +91,7 @@ velocity all create $(v_T0) 68534 dist gaussian
 
 
 #--------output----------------
-thermo 100
+thermo 1000
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
@@ -107,4 +107,4 @@ thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press
 unfix mynvt
 velocity Si set 0 $(sin(v_offangle)*v_vb) $(cos(v_offangle)*v_vb) sum yes
 fix mynve all nve 
-run 1000000
+run 10000000

@@ -3,7 +3,7 @@ from pydos2unix import dos2unix
 import scipy as scp
 #use 30 cpus to maximize usage
 #for f in *.sh; do sbatch "$f"; done
-velarr=np.logspace(3,8,60)
+velarr=np.logspace(5,7.2,10)#relative velocity cm/s
 gccarr =  np.array([1e-5,1,1e-5,1])
 Tarr = np.array([5000,5000,1e5,1e5])
 Z1arr = np.array([0.16,0.65,0.93,0.68])
@@ -38,7 +38,7 @@ def ccs2(vrel,vcom,T,gcc,z1,z2):# use kinetic energy difference, returns collisi
     return np.real(pi*rc**2)
 
 for i in range(len(velarr)):
-    for j in range(4):
+    for j in [0,2]:
         vel = velarr[i]
         Z1 = Z1arr[j]
         Z2 = Z2arr[j]
@@ -98,8 +98,8 @@ for i in range(len(velarr)):
         newfile = "unforcedvel_v{:.1e}_c{}.sh".format(vel,j)
         oldlog = "#SBATCH -o unforced_baselog.txt"
         newlog = "#SBATCH -o unforcedslumlogvel_v{:.1e}_c{}.txt".format(vel,j)
-        oldcmd = "mpiexec -n 20 lmp_mpi -in unforced_base.in"
-        newcmd = "mpiexec -n 20 lmp_mpi -in unforcedvel_v{:.1e}_c{}.in".format(vel,j)
+        oldcmd = "mpiexec -n 30 lmp_mpi -in unforced_base.in"
+        newcmd = "mpiexec -n 30 lmp_mpi -in unforcedvel_v{:.1e}_c{}.in".format(vel,j)
         with open(file_path, 'r', encoding='utf-8') as file:
             content = file.read()
         # Replace the text
