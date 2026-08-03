@@ -4,9 +4,11 @@ Each validation folder has a standalone Windows-safe script using
 `ProcessPoolExecutor`. Run from the repository root:
 
 ```powershell
+python .\theory\validation\acipc\run_acipc_fit.py --workers 8
 python .\theory\validation\cutoffradius\run_cutoff_radius_convergence.py --workers 8
 python .\theory\validation\impactparameterfit\run_impact_parameter_fit.py --workers 8
 python .\theory\validation\resolution\run_resolution_convergence.py --workers 8
+python .\theory\validation\shapeconvergence\run_shape_convergence.py --workers 8
 python .\theory\validation\strongcouplinglimit\run_rutherford_limit.py --workers 8
 python .\theory\validation\velocitylimits\run_velocity_limits.py --workers 8
 ```
@@ -14,11 +16,12 @@ python .\theory\validation\velocitylimits\run_velocity_limits.py --workers 8
 Useful quick-run options:
 
 ```powershell
+python .\theory\validation\acipc\run_acipc_fit.py --conditions 0 --workers 2 --fit-points-per-condition 4 --max-fit-evaluations 2 --curve-points 4 --vres 6 --rhores 12 --ures 12 --dphires 12 --quiet
 python .\theory\validation\velocitylimits\run_velocity_limits.py --conditions 0 --workers 2 --vres 6 --rhores 12 --ures 12 --dphires 12
 python .\theory\validation\impactparameterfit\run_impact_parameter_fit.py --conditions 0 --workers 2 --max-fit-evaluations 4 --curve-points 6 --fit-points-per-condition 2 --vres 6 --rhores 12 --ures 12 --dphires 12 --min-velocity-cm-s 1e6
 ```
 
-Default validation resolutions are `vres=50`, `rhores=180`, `ures=180`,
+Default validation resolutions are `vres=201`, `rhores=180`, `ures=180`,
 and `dphires=180`. Lower these on the command line only for smoke tests.
 
 Velocity inputs in the plots are labeled in `cm/s`; calls into
@@ -30,14 +33,24 @@ Each script writes a CSV and PNG files in its own folder. The plotted y
 axes are physical quantities: drag validations show `|drag| [N]`, and the
 Rutherford-limit validation shows scattering angle in radians.
 
+The acipc validation fits two physical cutoff parameters per condition:
+`acipc = r_angle,max / b_max` and the impact-parameter cutoff length
+`b_max` in meters. It reads the same default LAMMPS exponential-fit data as
+the impact-parameter fitting validation, selecting one low-error observation
+from each of several log-spaced experimental campaigns.
+
 The cutoff validation writes separate plots for `vrel`, `rhomax`, and
 `umax`. The resolution validation writes separate plots for `vres`,
 `rhores`, `ures`, and `dphires`. The velocity-limit validation samples up
 to `1e8 cm/s`.
 
+The shape-convergence validation resolves the condition-0 drag curve across
+the low-velocity tail, Bragg region, and high-velocity tail for several
+finite-launch cutoff fractions.
+
 The impact-parameter fitting validation fits the upper impact-parameter
 bound against the LAMMPS exponential-fit data used for `fit.png`. By
-default it reads `unforced/dataarchive/nprun4_29/results.npy`, expands each
+default it reads `theory/dataprocessing/output/results.npy`, expands each
 valid row into 10 points with `v = A exp(-t/tau)` and `a = v/tau`, uses
 only weakly coupled condition indexes `0` and `2`, and fits the 4 data
 points with the lowest relative acceleration error in each condition

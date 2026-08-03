@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import condition_label, make_drag, quiet_drag, relative_to_reference, velocity_cases, write_csv
 
 OUTDIR = Path(__file__).resolve().parent
-BASE_RESOLUTION = {"vres": 50, "rhores": 180, "ures": 180, "dphires": 180}
+BASE_RESOLUTION = {"vres": 201, "rhores": 180, "ures": 180, "dphires": 180}
 RESOLUTION_VALUES = {
-    "vres": [25, 35, 50, 70, 100],
+    "vres": [50, 101, 151, 201, 301],
     "rhores": [80, 120, 180, 240, 320],
     "ures": [80, 120, 180, 240, 320],
     "dphires": [80, 120, 180, 240, 320],

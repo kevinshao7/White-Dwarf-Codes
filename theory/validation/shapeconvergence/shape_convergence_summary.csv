@@ -1,0 +1,10 @@
+condition,condition_label,max_abs_log_slope_error,max_relative_error,nonfinite_count,nonpositive_count,parameter,parameter_label,peak_count,peak_velocity_cm_s,peak_velocity_log10_error,reference_peak_count,reference_peak_velocity_cm_s,reference_resolution,resolution,rms_log10_error
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,0.0,0,0,dphires,closest-approach deflection integral,0,100000000.0,0.0,0,100000000.0,3,3,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,0.0,0,0,rhores,impact-parameter integral,0,100000000.0,0.0,0,100000000.0,3,3,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,0.0,0,0,ures,infinity-to-start angle integral,0,100000000.0,0.0,0,100000000.0,3,3,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,0.0,0,0,vres,relative-velocity integral,0,100000000.0,0.0,0,100000000.0,3,3,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,nan,0,0,curve_points,drag-curve velocity grid,0,100000000.0,0.0,0,100000000.0,5,5,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,nan,0,0,curve_points,drag-curve velocity grid,0,100000000.0,0.0,0,100000000.0,5,5,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,nan,0,0,curve_points,drag-curve velocity grid,0,100000000.0,0.0,0,100000000.0,5,5,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,nan,0,0,curve_points,drag-curve velocity grid,0,100000000.0,0.0,0,100000000.0,5,5,0.0
+1,"T=5e+03 K, rho=1e+00 g/cm^3",0.0,nan,0,0,curve_points,drag-curve velocity grid,0,100000000.0,0.0,0,100000000.0,5,5,0.0

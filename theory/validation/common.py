@@ -23,7 +23,7 @@ CM_PER_S_TO_M_PER_S = 1.0e-2
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--conditions", nargs="+", type=int, default=[0, 1, 2, 3])
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--vres", type=int, default=50)
+    parser.add_argument("--vres", type=int, default=201)
     parser.add_argument("--rhores", type=int, default=180)
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
@@ -32,14 +32,19 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 def make_drag(
     condition: int,
-    vres: int = 50,
+    vres: int = 201,
     rhores: int = 180,
     ures: int = 180,
     dphires: int = 180,
-    cutoff_radius_factor: float = 1.0,
+    cutoff_radius_factor: float = 50.,
     vrel_sigma_width: float = 4.0,
     rhomax_fraction: float = 0.3,
+    dphi_endpoint_fraction: float = 1.0e-5,
+    acipc: float = 1.0,
 ) -> DragFourth:
+    """Construct the active drag solver with finite-angle radius fixed to bmax."""
+    if acipc != 1.0:
+        raise ValueError("acipc is fixed at 1 and is no longer a fit parameter")
     drag = DragFourth(
         condition,
         vres=vres,
@@ -48,6 +53,8 @@ def make_drag(
         dphires=dphires,
         vrel_sigma_width=vrel_sigma_width,
         rhomax_fraction=rhomax_fraction,
+        dphi_endpoint_fraction=dphi_endpoint_fraction,
+        acipc=acipc,
     )
     if cutoff_radius_factor != 1.0:
         set_cutoff_radius_factor(drag, cutoff_radius_factor)
@@ -83,6 +90,8 @@ def cutoff_defaults(condition: int) -> dict[str, float | str]:
         "hydrogen_interparticle_spacing_m": interparticle_spacing_m,
         "electron_debye_radius_m": drag.lD,
         "default_rhomax_m": drag.rhomax_fraction * interparticle_spacing_m,
+        "default_angle_cutoff_m": drag.acipc * drag.rhomax_fraction * interparticle_spacing_m,
+        "default_acipc": drag.acipc,
         "default_vrel_sigma_width": drag.vrel_sigma_width,
     }
 

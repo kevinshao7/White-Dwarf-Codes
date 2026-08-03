@@ -20,13 +20,19 @@ class DragFourth:
     Z2arr = np.array([0.26,3.82,4.27,3.81],dtype=np.float64)
     gccarr =  np.array([1e-5,1,1e-5,1],dtype=np.float64)
     Tarr = np.array([5000,5000,1e5,1e5],dtype=np.float64)
-    def __init__(self,conditions,vres=100,rhores=300,ures=100,dphires=100,vrel_sigma_width=4.0,rhomax_fraction=0.3):
+    def __init__(self,conditions,vres=100,rhores=300,ures=100,dphires=100,vrel_sigma_width=4.0,rhomax_fraction=0.3,dphi_endpoint_fraction=1e-5,acipc=1.0):
         self.vres=vres #resolution of velocity integration
         self.rhores=rhores #resolution of impact parameter integration
         self.ures = ures
         self.dphires = dphires
         self.vrel_sigma_width = vrel_sigma_width
         self.rhomax_fraction = rhomax_fraction
+        if rhomax_fraction <= 0:
+            raise ValueError("rhomax_fraction must be positive")
+        self.dphi_endpoint_fraction = dphi_endpoint_fraction
+        if not np.isclose(acipc, 1.0, rtol=0.0, atol=0.0):
+            raise ValueError("acipc is fixed at 1: the finite-angle radius equals bmax")
+        self.acipc = 1.0
         self.z1 = self.Z1arr[conditions]
         self.z2 = self.Z2arr[conditions]
         self.gcc = self.gccarr[conditions]
@@ -87,7 +93,14 @@ class DragFourth:
         for i in range(len(rhoinf)):
             uarr = np.linspace(1e-12*self.ustart,self.ustart,self.ures,endpoint=False)
             du = self.ustart/self.ures
-            results[i]=np.sum(self.Yint(uarr,rhoinf[i],E))*du
+            rhoi = rhoinf[i]
+            free_arg = 1-(rhoi*uarr)**2
+            yukawa_arg = free_arg-uarr*self.A*np.exp(-self.k0/uarr)/E
+            sqrt_free = np.sqrt(free_arg)
+            sqrt_yukawa = np.sqrt(yukawa_arg)
+            # Y-free, rationalized to avoid subtracting nearly equal inverse roots.
+            delta = rhoi*(free_arg-yukawa_arg)/(sqrt_free*sqrt_yukawa*(sqrt_free+sqrt_yukawa))
+            results[i]=np.arcsin(rhoi*self.ustart)+np.sum(delta)*du
         return results
     def phiC(self,rho,E): #vectorized in rho
         u0 = self.umax(rho,E) #r of closest approach, maximum u
@@ -95,30 +108,97 @@ class DragFourth:
         return self.pi/2-np.atan(C/(2*rho*(E)))#-self.phicutoff(rho,E,C) #start particle at rmax, subtract energy at rmax
 
     def dphiint(self,u,rho,E,C): #vectorized in u, scalar in E
-        # return self.Yint(u,rho,E)-self.Cint(u,rho,E,C)
-        return rho*(np.sqrt(1-(rho*u)**2-C*u/E)-np.sqrt(1-((rho*u)**2)-(u*self.A*np.exp(-self.k0/u))/E))/(np.sqrt((1-((rho*u)**2)-(u*self.A*np.exp(-self.k0/u))/E)*(1-(rho*u)**2-C*u/E)))
+        coulomb_arg = 1-(rho*u)**2-C*u/E
+        yukawa_arg = 1-(rho*u)**2-u*self.A*np.exp(-self.k0/u)/E
+        sqrt_coulomb = np.sqrt(coulomb_arg)
+        sqrt_yukawa = np.sqrt(yukawa_arg)
+        # Y-C with sqrt(a)-sqrt(b) rationalized as (a-b)/(sqrt(a)+sqrt(b)).
+        difference = u*(self.A*np.exp(-self.k0/u)-C)/E
+        return rho*difference/(sqrt_coulomb*sqrt_yukawa*(sqrt_coulomb+sqrt_yukawa))
     def Yint(self,u,rho,E): #vectorized in u
         return rho/(np.sqrt(1-((rho*u)**2)-(u*self.A*np.exp(-self.k0/u))/E))
 
     def Cint(self,u,rho,E,C): #vectorized in u, scalar in E
         arg = 1 - (rho*u)**2 - C*u/E
         return np.where(arg > 0, rho/np.sqrt(arg), 0.0)
-    def dphi(self,rho,E): #TODO: vectorized in rho
-        u0 = self.umax(rho,E) #find upper bound of u integral, vectorized in rho
-        C = self.A*np.exp(-self.k0/u0) #associated with rho
+    def dphi(self,rho,E,u0=None,C=None): #TODO: vectorized in rho
+        """Integrate Phi_Y - Phi_C from infinity to closest approach."""
+        if u0 is None:
+            u0 = self.umax(rho,E) #find upper bound of u integral, vectorized in rho
+        if C is None:
+            C = self.A*np.exp(-self.k0/u0) #associated with rho
         steps = self.dphires
-        frac = 1e-5
+        frac = self.dphi_endpoint_fraction
         results = np.zeros(len(u0))
         for i in range(len(rho)):
             rhoi = rho[i]
             Ci = C[i]
-            uarr = np.linspace(0,(1-frac)*u0[i],steps)
+            umin = min(1e-12*self.ustart,frac*u0[i])
+            umax = (1-frac)*u0[i]
+            uarr = np.linspace(umin,umax,steps)
             # plt.plot(uarr,np.abs(self.dphiint(uarr,rhoi,E,C[i])))
             # plt.xscale("log")
             # plt.yscale("log")
             # plt.show()
             results[i] = np.nansum(self.dphiint(uarr,rhoi,E,Ci))*(uarr[1]-uarr[0])#vectorized in uarr
         return results
+    def phiY_outer_cutoff(self,rho,E,u0):
+        """Integrate Yukawa orbital angle from infinity to the angle cutoff."""
+        results = np.zeros(len(rho))
+        angle_radius_cutoff = self.acipc*self.rhomax_fraction/self.ustart
+        cutoff_umax = 1/angle_radius_cutoff
+        frac = self.dphi_endpoint_fraction
+        for i in range(len(rho)):
+            integration_umax = min(cutoff_umax,(1-frac)*u0[i])
+            integration_umin = min(1e-12*self.ustart,frac*integration_umax)
+            if integration_umax <= integration_umin:
+                continue
+            uarr = np.linspace(integration_umin,integration_umax,self.dphires)
+            results[i] = np.nansum(self.Yint(uarr,rho[i],E))*(uarr[1]-uarr[0])
+        return results
+    def dphiYFree_outer_cutoff(self,rho,E,u0):
+        """Integrate Yukawa-minus-free outer angle without cancellation."""
+        results = np.zeros(len(rho))
+        angle_radius_cutoff = self.rhomax_fraction/self.ustart
+        cutoff_umax = 1/angle_radius_cutoff
+        frac = self.dphi_endpoint_fraction
+        for i in range(len(rho)):
+            integration_umax = min(cutoff_umax,(1-frac)*u0[i])
+            integration_umin = min(1e-12*self.ustart,frac*integration_umax)
+            if integration_umax <= integration_umin:
+                continue
+            uarr = np.linspace(integration_umin,integration_umax,self.dphires)
+            rhoi = rho[i]
+            free_arg = 1-(rhoi*uarr)**2
+            yukawa_term = uarr*self.A*np.exp(-self.k0/uarr)/E
+            yukawa_arg = free_arg-yukawa_term
+            sqrt_free = np.sqrt(free_arg)
+            sqrt_yukawa = np.sqrt(yukawa_arg)
+            # Y-free, rationalized to avoid subtracting nearly equal roots.
+            integrand = rhoi*yukawa_term/(sqrt_free*sqrt_yukawa*(sqrt_free+sqrt_yukawa))
+            results[i] = np.nansum(integrand)*(uarr[1]-uarr[0])
+        return results
+    def scattering_half_angle(self,rho,E):
+        """Return the finite-start theta/2 using a Rutherford reference.
+
+        The infinite-radius Yukawa result is the analytic Rutherford
+        half-angle minus the nonsingular Yukawa-Coulomb orbital-angle
+        difference.  The full finite-start scattering angle then subtracts
+        twice the Yukawa orbital-angle change from infinity to the starting
+        radius.  "Angle change" is relative to free straight-line geometry,
+        so the Yukawa outer angle and free outer angle must be differenced;
+        this guarantees zero deflection when the potential vanishes.
+        """
+        u0 = self.umax(rho,E)
+        C = self.A*np.exp(-self.k0/u0)
+        coulomb_half_angle = np.arctan(C/(2*rho*E))
+        coulomb_yukawa_difference = self.dphi(rho,E,u0=u0,C=C)
+        yukawa_free_outer_difference = self.dphiYFree_outer_cutoff(rho,E,u0)
+        return (
+            coulomb_half_angle
+            - coulomb_yukawa_difference
+            - yukawa_free_outer_difference
+        )
     def phiY(self,rho,E): #vectorized in rho, scalar in E 
         dPhi = self.dphi(rho,E)
         # nan_idx = np.where(np.isnan(phicutoff))[0]
@@ -130,64 +210,81 @@ class DragFourth:
         #     return (dPhi+self.phiC(rho,E)-phicutoff)[:idx] #coloumb from rmin to infinity, add difference from rmin to infinity, subtract yukawa from rmax to infinity
         return dPhi+self.phiC(rho,E)
     # def dragint()
+    def _drag_speed_integrand(self,speed,weight): #positive speed magnitude, signed Maxwellian weight
+        if speed <= 0.0 or weight == 0.0:
+            return 0.0
+        E = 0.5*self.mu*speed**2+self.E0Y #in this code, always use energy relative to infinity
+        vinf = np.sqrt(E/(0.5*self.mu))
+        #rhoup is maximum impact parameter at infinity
+        rhoup = self.rhomax_fraction*speed/(vinf*self.ustart)
+        rhoarr = np.zeros(self.rhores)
+        for j in range(self.rhores): #rhoarr spaced such that equal area
+            if j == 0:
+                rhoarr[0] = 0.5 * np.sqrt(rhoup**2/self.rhores)   # small nonzero midpoint
+            else:
+                rhoarr[j] = np.sqrt(rhoup**2/self.rhores + rhoarr[j-1]**2)
+        #1. start by evolving trajectories from infinity
+        vstartphi = rhoarr*vinf*self.ustart
+        alpha = np.arcsin(vstartphi/speed)
+        # print("max alpha,phiinfstart")
+        # print(np.max(alpha),np.max(phiinfstart))
+        rhostart = np.sin(alpha)/self.ustart
+        #2. keep trajectories with rhostart below the finite-launch cutoff
+        cutoff = self.rhomax_fraction/self.ustart
+        keep = rhostart <= cutoff
+        if not np.any(keep):
+            return 0.0
+        last = np.where(keep)[0][-1] + 1
+        rhostart = rhostart[:last]
+        if len(rhostart) < 2:
+            return 0.0
+        #deflection in v for whole collision
+        half_theta = self.scattering_half_angle(rhoarr,E)[:last]
+        drhostart = np.zeros(len(rhostart))
+        for j in range(len(rhostart)):
+            if j == 0:
+                drhostart[0] = (rhostart[1]+rhostart[0])/2
+            elif j == len(rhostart)-1:
+                drhostart[j] = (rhostart[j])-(rhostart[j] + rhostart[j-1])/2
+            else:
+                drhostart[j] = (rhostart[j+1] + rhostart[j])/2-(rhostart[j] + rhostart[j-1])/2
+        #for cross section purposes, want impact parameter at ustart, rstart
+        return np.sum(
+            rhostart
+            * drhostart
+            * speed**2
+            * weight
+            * (2.0 * np.square(np.sin(half_theta)))
+        )
+
     def drag(self,vb): #Newtons, vectorized in v
         sigmav = np.sqrt(self.kb*self.T/self.mu) #standard deviation in velocity due to thermal effects
         # for particle not starting at infinity, minium energy of particle is nonzero
-        #varr is velocity at rstart
-        varr = np.linspace(vb-self.vrel_sigma_width*sigmav,vb+self.vrel_sigma_width*sigmav,self.vres)
-        rhoupcandidate = max([self.lD,self.nh**(-1/3)])
-
-        #rhoarr is evenly spaced in area at starting ustart, rstart
-        # rhoarr = np.linspace(1e-24,rhoup,self.rhores)
-        # drho = rhoarr[1]-rhoarr[0]
-        dv = varr[1]-varr[0]
-        result=0
-        Earr = 0.5*self.mu*np.square(varr)+self.E0Y #in this code, always use energy relative to infinity
-        fvarr = np.sqrt(self.mu/(2*self.pi*self.kb*self.T))*np.exp(-self.mu*((varr-vb)**2)/(2*self.kb*self.T))
-        #angle between infinity and closest approach
-        phiinfmin=np.zeros((self.vres,self.rhores))
-        #angle between infinity and start
-        phiinfstart=np.zeros((self.vres,self.rhores))
+        # Pair positive and negative relative velocities at the same speed.
+        # This avoids accumulating two large thermal lobes whose difference is
+        # the small low-drift drag signal.
+        width = self.vrel_sigma_width*sigmav
+        vmin = vb-width
+        vmax = vb+width
+        speed_min = 0.0 if vmin <= 0.0 <= vmax else min(abs(vmin),abs(vmax))
+        speed_max = max(abs(vmin),abs(vmax))
+        if self.vres < 1 or speed_max <= speed_min:
+            return 0.0
+        ds = (speed_max-speed_min)/self.vres
+        speeds = speed_min+(np.arange(self.vres,dtype=np.float64)+0.5)*ds
+        norm = np.sqrt(self.mu/(2*self.pi*self.kb*self.T))
         print("phi")
-        for i in range(len(varr)):
-            if np.abs(varr[i]) == 0.0:
-                continue
-            vinf = np.sqrt(Earr[i]/(0.5*self.mu))
-            #rhoup is maximum impact parameter at infinity
-            rhoup = self.rhomax_fraction*np.abs(varr[i])/(vinf*self.ustart)
-            rhoarr = np.zeros(self.rhores)
-            for j in range(self.rhores): #rhoarr spaced such that equal area
-                if j == 0:
-                    rhoarr[0] = 0.5 * np.sqrt(rhoup**2/self.rhores)   # small nonzero midpoint
-                else:
-                    rhoarr[j] = np.sqrt(rhoup**2/self.rhores + rhoarr[j-1]**2)
-            #1. start by evolving trajectories from infinity
-            phiinfmin[i,:] = self.phiY(rhoarr,Earr[i])#deflection angle due to yukawa
-            phiinfstart[i,:] = self.phiinfstart(rhoarr,Earr[i])
-            vstartphi = rhoarr*vinf*self.ustart
-            alpha = np.arcsin(vstartphi/np.abs(varr[i]))
-            # print("max alpha,phiinfstart")
-            # print(np.max(alpha),np.max(phiinfstart))
-            rhostart = np.sin(alpha)/self.ustart
-            #2. keep trajectories with rhostart<0.4 rstart
-            maxi = np.argmin(np.abs(rhostart-self.rhomax_fraction/self.ustart))
-
-            rhostart = rhostart[:maxi]
-            # print(maxi/self.rhores)
-            #deflection in v for whole collision
-            theta = 2*(self.pi/2-phiinfmin[i,:]-alpha+phiinfstart[i,:])[:maxi]
-            drhostart = np.zeros(len(rhostart))
-            for j in range(len(rhostart)):
-                if j == 0:
-                    drhostart[0] = (rhostart[1]+rhostart[0])/2
-                elif j == len(rhostart)-1:
-                    drhostart[j] = (rhostart[j])-(rhostart[j] + rhostart[j-1])/2
-                else:
-                    drhostart[j] = (rhostart[j+1] + rhostart[j])/2-(rhostart[j] + rhostart[j-1])/2
-            #for cross section purposes, want impact parameter at ustart, rstart
-            # print(np.min(theta),np.max(theta))
-            result += np.sum(rhostart*drhostart*(varr[i]*abs(varr[i]))*fvarr[i]*(1-np.cos(theta))) 
-        return 2*self.pi*self.nh*self.mu*result*dv #drag force on silicon
+        result=0
+        for speed in speeds:
+            positive_weight = 0.0
+            negative_weight = 0.0
+            if vmin <= speed <= vmax:
+                positive_weight = norm*np.exp(-self.mu*((speed-vb)**2)/(2*self.kb*self.T))
+            if vmin <= -speed <= vmax:
+                negative_weight = norm*np.exp(-self.mu*((-speed-vb)**2)/(2*self.kb*self.T))
+            signed_weight = positive_weight-negative_weight
+            result += self._drag_speed_integrand(speed,signed_weight)
+        return 2*self.pi*self.nh*self.mu*result*ds #drag force on silicon
 if __name__ == "__main__":
     vb = 1e4
     y = np.zeros(4)

@@ -1,0 +1,2 @@
+acipc,angle_radius_cutoff_m,condition,condition_label,impact_parameter_cutoff_m,max_abs_log_slope_error,max_relative_error,nonfinite_count,nonpositive_count,peak_velocity_cm_s,peak_velocity_log10_error,reference_acipc,reference_peak_velocity_cm_s,rms_log10_drag_error
+1.0,3.68281916818755e-09,1,"T=5e+03 K, rho=1e+00 g/cm^3",3.68281916818755e-09,0.0,0.0,0,0,100000000.0,0.0,1.0,100000000.0,0.0

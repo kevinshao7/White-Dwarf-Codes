@@ -1,3 +1,4 @@
+# Run from repository root: python .\theory\validation\impactparameterfit\run_impact_parameter_fit.py --workers 8
 from __future__ import annotations
 
 import argparse
@@ -24,6 +25,7 @@ from common import CM_PER_S_TO_M_PER_S, condition_label, make_drag, quiet_drag, 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALL_CONDITIONS = (0, 1, 2, 3)
 STRONGLY_COUPLED_CONDITIONS = (1, 3)
+FIT_CONDITIONS = (1, 3)
 COUPLING_PARAMETER = {0: 0.03, 1: 1.94, 2: 0.42, 3: 1.05}
 LAMMPS_SOURCE_RE = re.compile(r"\[(\d+),(\d+),(\d+)\]$")
 
@@ -542,8 +544,8 @@ def evaluate_fit_parallel(
     }
 
 
-def run_curve_case(task: tuple[int, float, str, float, int, int, int, int, bool]) -> dict[str, float | int | str]:
-    condition, fit_value, fit_parameter, velocity_cm_s, vres, rhores, ures, dphires, progress = task
+def run_curve_case(task: tuple[int, float, float, str, float, int, int, int, int, bool]) -> dict[str, float | int | str]:
+    condition, parameter_scale, fit_value, fit_parameter, velocity_cm_s, vres, rhores, ures, dphires, progress = task
     label = fit_value_label(fit_parameter)
     try:
         drag = make_drag_for_fit(condition, fit_value, fit_parameter, vres, rhores, ures, dphires)
@@ -557,6 +559,7 @@ def run_curve_case(task: tuple[int, float, str, float, int, int, int, int, bool]
         )
         return {
             "condition": condition,
+            "parameter_scale": parameter_scale,
             "fit_parameter": fit_parameter,
             "fit_value": fit_value,
             "velocity_cm_s": velocity_cm_s,
@@ -570,6 +573,7 @@ def run_curve_case(task: tuple[int, float, str, float, int, int, int, int, bool]
         progress_print(progress, f"[curve failed] condition={condition} {label}={fit_value:.6g} v={velocity_cm_s:.6e} error={exc!r}")
         return {
             "condition": condition,
+            "parameter_scale": parameter_scale,
             "fit_parameter": fit_parameter,
             "fit_value": fit_value,
             "velocity_cm_s": velocity_cm_s,
@@ -618,8 +622,27 @@ def plot_results(
         selected_sources = {point.source for point in fit_points if point.condition == condition}
         fit_group = [point for point in fit_points if point.condition == condition]
         best = next(row for row in summary_rows if row["condition"] == condition)
-        curve = [row for row in curve_rows if row["condition"] == condition and row["status"] == "ok"]
+        curve = [
+            row for row in curve_rows
+            if row["condition"] == condition
+            and row["status"] == "ok"
+            and float(row.get("parameter_scale", 1.0)) == 1.0
+        ]
         curve.sort(key=lambda row: row["velocity_cm_s"])
+        lower_curve = [
+            row for row in curve_rows
+            if row["condition"] == condition
+            and row["status"] == "ok"
+            and float(row.get("parameter_scale", 1.0)) == 0.9
+        ]
+        upper_curve = [
+            row for row in curve_rows
+            if row["condition"] == condition
+            and row["status"] == "ok"
+            and float(row.get("parameter_scale", 1.0)) == 1.1
+        ]
+        lower_curve.sort(key=lambda row: row["velocity_cm_s"])
+        upper_curve.sort(key=lambda row: row["velocity_cm_s"])
 
         ax.errorbar(
             [point.velocity_cm_s for point in group],
@@ -644,6 +667,22 @@ def plot_results(
             linewidths=1.5,
             label=f"condition {condition} fit window",
         )
+        if len(lower_curve) == len(curve) == len(upper_curve):
+            lower_acceleration = np.array(
+                [row["model_acceleration_cm_s2"] for row in lower_curve], dtype=float
+            )
+            upper_acceleration = np.array(
+                [row["model_acceleration_cm_s2"] for row in upper_curve], dtype=float
+            )
+            ax.fill_between(
+                [row["velocity_cm_s"] for row in curve],
+                np.minimum(lower_acceleration, upper_acceleration),
+                np.maximum(lower_acceleration, upper_acceleration),
+                color=color,
+                alpha=0.14,
+                linewidth=0,
+                label=f"condition {condition}, best-fit parameter +/- 10%",
+            )
         ax.plot(
             [row["velocity_cm_s"] for row in curve],
             [row["model_acceleration_cm_s2"] for row in curve],
@@ -720,7 +759,14 @@ def condition_curve_velocities(points: list[DataPoint], n_curve: int) -> dict[in
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--conditions", nargs="+", type=int, default=list(ALL_CONDITIONS))
+    parser.add_argument(
+        "--conditions",
+        nargs="+",
+        type=int,
+        default=list(FIT_CONDITIONS),
+        choices=FIT_CONDITIONS,
+        help="Conditions to fit; restricted to the well-sampled conditions 1 and 3.",
+    )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
         "--fit-parameter",
@@ -741,7 +787,15 @@ def main() -> None:
     )
     parser.add_argument("--max-fit-evaluations", type=int, default=20)
     parser.add_argument("--data-csv", type=Path)
-    parser.add_argument("--lammps-results", type=Path, default=REPO_ROOT / "unforced" / "dataarchive" / "nprun4_29" / "results.npy")
+    parser.add_argument(
+        "--lammps-results",
+        type=Path,
+        default=REPO_ROOT / "theory" / "dataprocessing" / "output" / "results.npy",
+        help=(
+            "Velocity-decay fit array shaped (condition, campaign, 6). "
+            "Defaults to the reliability-filtered output from theory/dataprocessing."
+        ),
+    )
     parser.add_argument("--samples-per-lammps-fit", type=int, default=10)
     parser.add_argument(
         "--fit-points-per-condition",
@@ -763,15 +817,35 @@ def main() -> None:
         raise SystemExit("--fit-min must be >= 0 and --fit-max must be greater than --fit-min.")
 
     requested_conditions = set(args.conditions)
-    unknown_conditions = requested_conditions.difference(ALL_CONDITIONS)
+    unknown_conditions = requested_conditions.difference(FIT_CONDITIONS)
     if unknown_conditions:
-        raise SystemExit(f"Unknown condition indexes {sorted(unknown_conditions)}; valid conditions are {list(ALL_CONDITIONS)}.")
+        raise SystemExit(
+            f"Unsupported condition indexes {sorted(unknown_conditions)}; "
+            f"this fitter is restricted to conditions {list(FIT_CONDITIONS)}."
+        )
 
     if args.data_csv:
         all_points = load_points_from_csv(args.data_csv, requested_conditions)
     else:
         all_points = load_lammps_expfit_points(args.lammps_results, requested_conditions, args.samples_per_lammps_fit)
     all_points = filter_points(all_points, args.min_velocity_cm_s, args.max_velocity_cm_s, args.max_relative_sigma)
+    available_conditions = {point.condition for point in all_points}
+    omitted_conditions = sorted(requested_conditions.difference(available_conditions))
+    omitted_condition_rows = [
+        {
+            "condition": condition,
+            "reason": "no usable retained velocity-decay fits after data-processing and impact-fit filters",
+            "data_source": str(args.data_csv if args.data_csv else args.lammps_results),
+        }
+        for condition in omitted_conditions
+    ]
+    for row in omitted_condition_rows:
+        print(f"[condition omitted] condition={row['condition']}: {row['reason']}", file=sys.stderr)
+    requested_conditions.intersection_update(available_conditions)
+    if not requested_conditions:
+        write_csv(OUTDIR / "impact_parameter_fit_omitted_conditions.csv", omitted_condition_rows)
+        raise SystemExit("No requested condition has usable retained data; no impact-parameter results were generated.")
+
     fit_points, fit_point_selection_by_condition = select_fit_points(all_points, args.fit_points_per_condition)
     if not fit_points:
         raise SystemExit("No usable fit points found. Check --conditions, data path, velocity/error filters, or --fit-points-per-condition.")
@@ -877,25 +951,29 @@ def main() -> None:
         curve_tasks = []
         for summary in summary_rows:
             condition = int(summary["condition"])
-            for velocity_cm_s in curve_velocities[condition]:
-                curve_tasks.append(
-                    (
-                        condition,
-                        float(summary["best_fit_value"]),
-                        args.fit_parameter,
-                        float(velocity_cm_s),
-                        args.vres,
-                        args.rhores,
-                        args.ures,
-                        args.dphires,
-                        not args.quiet,
+            best_fit_value = float(summary["best_fit_value"])
+            for parameter_scale in (0.9, 1.0, 1.1):
+                for velocity_cm_s in curve_velocities[condition]:
+                    curve_tasks.append(
+                        (
+                            condition,
+                            parameter_scale,
+                            parameter_scale * best_fit_value,
+                            args.fit_parameter,
+                            float(velocity_cm_s),
+                            args.vres,
+                            args.rhores,
+                            args.ures,
+                            args.dphires,
+                            not args.quiet,
+                        )
                     )
-                )
         curve_rows = list(pool.map(run_curve_case, curve_tasks))
 
     write_csv(OUTDIR / "impact_parameter_fit_predictions.csv", prediction_rows)
     write_csv(OUTDIR / "impact_parameter_fit_curve.csv", curve_rows)
     write_csv(OUTDIR / "impact_parameter_fit_summary.csv", summary_rows)
+    write_csv(OUTDIR / "impact_parameter_fit_omitted_conditions.csv", omitted_condition_rows)
     plot_results(all_points, fit_points, curve_rows, summary_rows, args.fit_parameter)
 
     for row in summary_rows:

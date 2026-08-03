@@ -10,3 +10,4 @@ unforced/run7_28/
 *.npy
 *unforcedvel*
 deprecateed/
+*diagnostics*
