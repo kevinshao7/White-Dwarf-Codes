@@ -1,11 +1,41 @@
-#!/bin/bash
-#SBATCH  --time 4:00:00 
-#SBATCH --gres=gpu:h200:1 # use 1 H200.
-#SBATCH --cpus-per-task=4 # request 1/8 of available CPUs on a H200 node.
-#SBATCH --mem=250000 # grant the job access to 1/8 of the memory on a H200 node.
-#SBATCH --mail-type=END
+#!/bin/bash -l
+
+#SBATCH --job-name=lammps_h200
+#SBATCH --chdir=/dais/fs/scratch/kshao/wd
+
+#SBATCH --partition=gpu1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=1
+
+#SBATCH --gres=gpu:h200:1
+#SBATCH --mem=250000
+#SBATCH --time=04:00:00
+
+#SBATCH --output=unforced_baselog.%j.txt
+#SBATCH --error=unforced_baseerr.%j.txt
+#SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ks2120@cam.ac.uk
-#SBATCH -o unforcedslumlogvel_v9.5e+05_c2.txt
+
 module purge
 module load gcc/15
-mpiexec -n 30 /u/kshao/software/lammps-gpu-install/bin/lmp -in unforced_base.in
+
+MPI_ROOT=/mpcdf/soft/SLE_15/packages/skylake/openmpi/gcc_15-15.1.0/5.0.10
+CUDA_ROOT=/mpcdf/soft/SLE_15/packages/x86_64/cuda/13.0.1
+
+export LD_LIBRARY_PATH="$MPI_ROOT/lib:$CUDA_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+export OMPI_MCA_smsc="^knem"
+export OMP_NUM_THREADS=1
+
+LMP=/u/kshao/software/lammps-gpu-install/bin/lmp
+
+echo "Running on: $(hostname)"
+echo "MPI tasks: $SLURM_NTASKS"
+echo "Visible GPUs: $CUDA_VISIBLE_DEVICES"
+
+nvidia-smi
+
+srun "$LMP" \
+    -sf gpu \
+    -pk gpu 1 \
+    -in unforced_base.in
