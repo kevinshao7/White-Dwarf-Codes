@@ -1,10 +1,12 @@
 #!/bin/bash
-#SBATCH  --time 12:00:00 
+#SBATCH  --time 4:00:00 
+#SBATCH --gres=gpu:h200:1 # use 1 H200.
+#SBATCH --cpus-per-task=4 # request 1/8 of available CPUs on a H200 node.
+#SBATCH --mem=250000 # grant the job access to 1/8 of the memory on a H200 node.
 #SBATCH --mail-type=END
 #SBATCH --mail-user=ks2120@cam.ac.uk
-#SBATCH -n 30
 #SBATCH -o unforcedslumlogvel_v1.7e+06_c2.txt
 module load voro/0.4.6
 module load eigen/3.3.2
 module load latte/1.1.1
-mpiexec -n 30 /u/kshao/software/lammps-install/bin/lmp -in unforced_base.in
+mpiexec -n 30 /u/kshao/software/lammps-gpu-install/bin/lmp -in unforced_base.in
