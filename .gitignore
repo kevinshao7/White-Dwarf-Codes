@@ -8,6 +8,5 @@ unforced/run7_28/
 *.np
 *.gif
 *.npy
-*unforcedvel*
 deprecateed/
 *diagnostics*
