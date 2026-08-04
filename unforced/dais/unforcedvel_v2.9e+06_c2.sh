@@ -6,7 +6,6 @@
 #SBATCH --mail-type=END
 #SBATCH --mail-user=ks2120@cam.ac.uk
 #SBATCH -o unforcedslumlogvel_v2.9e+06_c2.txt
-module load voro/0.4.6
-module load eigen/3.3.2
-module load latte/1.1.1
+module purge
+module load gcc/15
 mpiexec -n 30 /u/kshao/software/lammps-gpu-install/bin/lmp -in unforced_base.in
