@@ -1,41 +1,42 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=lammps_h200
-#SBATCH --chdir=/dais/fs/scratch/kshao/wd
-
+#SBATCH --job-name=unforced_base
 #SBATCH --partition=gpu1
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks=4
 #SBATCH --cpus-per-task=1
-
 #SBATCH --gres=gpu:h200:1
 #SBATCH --mem=250000
-#SBATCH --time=04:00:00
 
-#SBATCH --output=unforced_baselog.%j.txt
-#SBATCH --error=unforced_baseerr.%j.txt
+#SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais
+#SBATCH --output=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/unforced_base_%j.out
+#SBATCH --error=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/unforced_base_%j.err
+
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ks2120@cam.ac.uk
 
 module purge
 module load gcc/15
 
-MPI_ROOT=/mpcdf/soft/SLE_15/packages/skylake/openmpi/gcc_15-15.1.0/5.0.10
-CUDA_ROOT=/mpcdf/soft/SLE_15/packages/x86_64/cuda/13.0.1
-
-export LD_LIBRARY_PATH="$MPI_ROOT/lib:$CUDA_ROOT/lib64:${LD_LIBRARY_PATH:-}"
-export OMPI_MCA_smsc="^knem"
-export OMP_NUM_THREADS=1
-
 LMP=/u/kshao/software/lammps-gpu-install/bin/lmp
 
-echo "Running on: $(hostname)"
+echo "Job started: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Host: $(hostname)"
+echo "Working directory: $(pwd)"
 echo "MPI tasks: $SLURM_NTASKS"
-echo "Visible GPUs: $CUDA_VISIBLE_DEVICES"
+echo "GPU visibility: $CUDA_VISIBLE_DEVICES"
 
 nvidia-smi
 
 srun "$LMP" \
     -sf gpu \
     -pk gpu 1 \
+    -log "unforced_base_${SLURM_JOB_ID}.lammps.log" \
     -in unforced_base.in
+
+status=$?
+echo "LAMMPS exit status: $status"
+echo "Job finished: $(date)"
+exit "$status"
