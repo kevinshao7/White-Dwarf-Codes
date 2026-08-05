@@ -17,8 +17,8 @@ variable offangle equal 0.3 #offset angle in radians to prevent overlapping trac
 variable avogadro equal 6.022e23
 variable mH equal $(0.001*1.008/v_avogadro) #Hydrogen mass kg/atom
 variable mSi equal $(0.001*28.09/v_avogadro) #Silicon mass kg/atom
-variable NH equal 500000
-variable NSi equal 2000
+variable NH equal 100000
+variable NSi equal 1000
 variable kb equal 1.38e-23 #SI units
 variable ctostatc equal 2.99792e9 #coulomb to statcoulomb
 variable qe equal 1.60217663e-19 #SI units
