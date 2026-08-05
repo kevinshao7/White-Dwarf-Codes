@@ -16,30 +16,56 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ks2120@cam.ac.uk
 
-module purge
-module load gcc/15
+set -euo pipefail
 
+# Remove any inherited GCC 15 / CUDA 13 / Open MPI paths.
+module purge
+unset MPI_ROOT
+unset CUDA_ROOT
+unset LD_LIBRARY_PATH
+
+# Toolchain used to build this LAMMPS executable.
+module load gcc/14
+module load cuda/12.8
+module load openmpi/5.0
+
+# One MPI process controls the H200.
 export OMP_NUM_THREADS=1
+
+# Disable unavailable KNEM transport and use Open MPI's fallback.
 export OMPI_MCA_smsc="^knem"
 
-# Diagnostic: report CUDA errors at their actual location.
-export CUDA_LAUNCH_BLOCKING=1
+LMP=/u/kshao/software/lammps-gpu-cuda12-install/bin/lmp
+INPUT=unforced_base.in
+LMP_LOG="unforced_base_${SLURM_JOB_ID}.lammps.log"
 
-LMP=/u/kshao/software/lammps-gpu-install/bin/lmp
+echo "Job ID:        $SLURM_JOB_ID"
+echo "Host:          $(hostname)"
+echo "Start time:    $(date)"
+echo "Working dir:   $(pwd)"
+echo "MPI tasks:     $SLURM_NTASKS"
+echo "CPUs/task:     $SLURM_CPUS_PER_TASK"
+echo "Visible GPU:   ${CUDA_VISIBLE_DEVICES:-not-set}"
+echo "LAMMPS:        $LMP"
+echo "Input:         $INPUT"
 
-echo "Host: $(hostname)"
-echo "Tasks: $SLURM_NTASKS"
-echo "Visible GPU: $CUDA_VISIBLE_DEVICES"
+module list 2>&1
 
-nvidia-smi
+nvidia-smi \
+    --query-gpu=name,uuid,driver_version,memory.total \
+    --format=csv
 
-srun --ntasks=1 \
+test -x "$LMP"
+test -f "$INPUT"
+
+srun \
+    --ntasks="$SLURM_NTASKS" \
+    --kill-on-bad-exit=1 \
     "$LMP" \
     -sf gpu \
-    -pk gpu 1 \
-    -log "unforced_base_${SLURM_JOB_ID}.lammps.log" \
-    -in unforced_base.in
+    -pk gpu 1 neigh no \
+    -log "$LMP_LOG" \
+    -in "$INPUT"
 
-status=$?
-echo "LAMMPS exit status: $status"
-exit "$status"
+echo "LAMMPS completed successfully."
+echo "End time: $(date)"
