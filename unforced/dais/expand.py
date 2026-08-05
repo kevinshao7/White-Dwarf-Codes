@@ -98,15 +98,24 @@ for i in range(len(velarr)):
 
         file_path = 'unforced_base.sh'  # Path to your file
         newfile = "unforcedvel_v{:.1e}_c{}.sh".format(vel,j)
-        oldlog = "#SBATCH -o unforced_baselog.txt"
-        newlog = "#SBATCH -o unforcedslumlogvel_v{:.1e}_c{}.txt".format(vel,j)
-        oldcmd = "mpiexec -n 30 lmp_mpi -in unforced_base.in"
-        newcmd = "mpiexec -n 30 lmp_mpi -in unforcedvel_v{:.1e}_c{}.in".format(vel,j)
+        oldjob = "#SBATCH --job-name=unforced_base"
+        newjob = "#SBATCH --job-name=unforcedvel_v{:.1e}_c{}".format(vel,j)
+        oldout = "#SBATCH --output=unforced_base_%j.out"
+        newout = "#SBATCH --output=unforcedvel_v{:.1e}_c{}_%j.out".format(vel,j)
+        olderr = "#SBATCH --error=unforced_base_%j.err"
+        newerr = "#SBATCH --error=unforcedvel_v{:.1e}_c{}_%j.err".format(vel,j)
+        oldinput = "INPUT=unforced_base.in"
+        newinput = "INPUT=unforcedvel_v{:.1e}_c{}.in".format(vel,j)
+        oldlammpslog = 'LMP_LOG="unforced_base_${SLURM_JOB_ID}.lammps.log"'
+        newlammpslog = 'LMP_LOG="unforcedvel_v{:.1e}_c{}_${{SLURM_JOB_ID}}.lammps.log"'.format(vel,j)
         with open(file_path, 'r', encoding='utf-8') as file:
             content = file.read()
         # Replace the text
-        updated_content = content.replace(oldlog, newlog)
-        updated_content = updated_content.replace(oldcmd, newcmd)
+        updated_content = content.replace(oldjob, newjob)
+        updated_content = updated_content.replace(oldout, newout)
+        updated_content = updated_content.replace(olderr, newerr)
+        updated_content = updated_content.replace(oldinput, newinput)
+        updated_content = updated_content.replace(oldlammpslog, newlammpslog)
         # Write the modified content back to the file (overwrite)
         with open(newfile, 'w', encoding='utf-8') as file:
             file.write(updated_content)

@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=unforced_base
+#SBATCH --job-name=unforcedvel_v5.1e+06_c2
 #SBATCH --partition=gpu1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -10,8 +10,8 @@
 #SBATCH --time=04:00:00
 
 #SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais
-#SBATCH --output=unforced_base_%j.out
-#SBATCH --error=unforced_base_%j.err
+#SBATCH --output=unforcedvel_v5.1e+06_c2_%j.out
+#SBATCH --error=unforcedvel_v5.1e+06_c2_%j.err
 
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=ks2120@cam.ac.uk
@@ -36,8 +36,8 @@ export OMP_NUM_THREADS=1
 export OMPI_MCA_smsc="^knem"
 
 LMP=/u/kshao/software/lammps-gpu-cuda12-install/bin/lmp
-INPUT=unforced_base.in
-LMP_LOG="unforced_base_${SLURM_JOB_ID}.lammps.log"
+INPUT=unforcedvel_v5.1e+06_c2.in
+LMP_LOG="unforcedvel_v5.1e+06_c2_${SLURM_JOB_ID}.lammps.log"
 
 echo "Job ID:        $SLURM_JOB_ID"
 echo "Host:          $(hostname)"
