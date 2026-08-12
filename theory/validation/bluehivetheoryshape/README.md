@@ -31,16 +31,16 @@ The job layout is:
 The compute jobs need:
 
 ```bash
-module load python3/3.12.0
-python -m venv /home/kshao4/env
+module load python3/3.11.10
+python3 -m venv /home/kshao4/env
 source /home/kshao4/env/bin/activate
-pip install -r requirements_hpc.txt
+python3 -m pip install -r requirements_hpc.txt
 ```
 
 Equivalent explicit install:
 
 ```bash
-pip install numpy scipy matplotlib
+python3 -m pip install numpy scipy matplotlib
 ```
 
 `numpy` and `scipy` are required for the calculations.  `matplotlib` is only
@@ -51,10 +51,10 @@ required for `aggregate_results.py` to make the final plots.
 From this directory:
 
 ```bash
-module load python3/3.12.0
+module load python3/3.11.10
 source /home/kshao4/env/bin/activate
-python generate_tasks.py
-python generate_slurm_files.py
+python3 generate_tasks.py
+python3 generate_slurm_files.py
 mkdir -p logs task_results
 for job in slurm/shape_*.slurm; do sbatch "$job"; done
 ```
@@ -68,7 +68,7 @@ bash submit_120.sh
 After all 120 jobs finish:
 
 ```bash
-python aggregate_results.py
+python3 aggregate_results.py
 ```
 
 Outputs:

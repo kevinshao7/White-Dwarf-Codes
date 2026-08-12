@@ -19,14 +19,14 @@ SLURM_TEMPLATE = """#!/bin/bash
 
 set -euo pipefail
 
-module load python3/3.12.0
+module load python3/3.11.10
 source /home/kshao4/env/bin/activate
 
 cd "${{SLURM_SUBMIT_DIR}}"
 mkdir -p logs task_results
 
 export TASK_ID={task_id}
-python run_task.py --task-id "${{TASK_ID}}"
+python3 run_task.py --task-id "${{TASK_ID}}"
 """
 
 
