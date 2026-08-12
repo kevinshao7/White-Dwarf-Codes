@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from hpc_shape_common import TASKS_CSV, read_rows_csv, run_condition_velocity_task, task_output_path, write_rows_csv
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one BlueHive impact-parameter shape task.")
-    parser.add_argument("--tasks-csv", default=str(TASKS_CSV))
+    parser.add_argument("--tasks-csv", type=Path, default=TASKS_CSV)
     parser.add_argument(
         "--task-id",
         type=int,

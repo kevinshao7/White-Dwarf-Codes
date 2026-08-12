@@ -83,7 +83,8 @@ def task_resolution(bmax_over_aH: float, vres: int = DEFAULT_VRES) -> dict[str, 
     }
 
 
-def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
+def write_rows_csv(path: str | Path, rows: list[dict[str, object]]) -> None:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
     with path.open("w", newline="") as fh:
@@ -92,7 +93,8 @@ def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def read_rows_csv(path: Path) -> list[dict[str, str]]:
+def read_rows_csv(path: str | Path) -> list[dict[str, str]]:
+    path = Path(path)
     with path.open(newline="") as fh:
         return list(csv.DictReader(fh))
 
