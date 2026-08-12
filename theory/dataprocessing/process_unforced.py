@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from multiprocessing import freeze_support
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -40,6 +41,8 @@ class FitConfig:
     minimum_window_duration_fraction: float = 0.10
     minimum_tau_s: float = 1.0e-20
     window_length_score_power: float = 1.0
+    fit_window_stride: int = 10
+    max_optimizer_evaluations: int = 1000
     sigma_floor_fraction: float = 1.0e-6
     max_relative_tau_sigma: float = 1.0
     max_reduced_chi2: float = 100.0
@@ -120,6 +123,14 @@ def load_trajectory(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return velocities, times
 
 
+def load_trajectory_stats(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    velocities, times = load_trajectory(path)
+    n_atoms = velocities.shape[1]
+    mean = np.mean(velocities, axis=1)
+    sem = np.std(velocities, axis=1, ddof=1) / math.sqrt(n_atoms)
+    return mean, sem, times, n_atoms
+
+
 def timestep_seconds_from_log(path: Path) -> float:
     """Read timestep size from the first two numeric thermo rows."""
     numeric_rows: list[tuple[float, float]] = []
@@ -147,12 +158,84 @@ def timestep_seconds_from_log(path: Path) -> float:
     raise ValueError(f"could not obtain two thermo rows from {path.name}")
 
 
-def load_raw_lammps_trajectory(path: Path, log_path: Path, angle_radians: float = 0.3) -> tuple[np.ndarray, np.ndarray]:
+def resolve_lammps_log_path(raw_trajectory_path: Path, raw_dir: Path) -> Path:
+    """Find the matching LAMMPS thermo output for a raw trajectory dump."""
+    log_stem = raw_trajectory_path.stem.replace("trajvel_", "unforcedvel_", 1)
+    candidates = [
+        raw_dir / f"{log_stem}.log",
+        raw_dir / f"{log_stem}.lammps.log",
+        raw_trajectory_path.with_name(f"{log_stem}.log"),
+        raw_trajectory_path.with_name(f"{log_stem}.lammps.log"),
+    ]
+    candidates.extend(sorted(raw_dir.glob(f"{log_stem}_*.lammps.log")))
+    candidates.extend(sorted(raw_dir.glob(f"{log_stem}_*.out")))
+    candidates.extend(sorted(raw_trajectory_path.parent.glob(f"{log_stem}_*.lammps.log")))
+    candidates.extend(sorted(raw_trajectory_path.parent.glob(f"{log_stem}_*.out")))
+    for candidate in dict.fromkeys(candidates):
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(candidate.name for candidate in candidates)
+    raise FileNotFoundError(f"no LAMMPS thermo log found for {raw_trajectory_path.name}; searched {searched}")
+
+
+def count_raw_lammps_snapshots(path: Path, progress_interval: int = 5000) -> int:
+    """Count custom-dump snapshots without parsing per-atom floating point fields."""
+    count = 0
+    with path.open(encoding="utf-8", errors="strict") as handle:
+        while True:
+            marker = handle.readline()
+            if not marker:
+                break
+            if marker.strip() != "ITEM: TIMESTEP":
+                raise ValueError(f"unexpected dump marker {marker.strip()!r}")
+            handle.readline()
+            if handle.readline().strip() != "ITEM: NUMBER OF ATOMS":
+                raise ValueError("missing NUMBER OF ATOMS marker")
+            atom_count = int(handle.readline())
+            if not handle.readline().startswith("ITEM: BOX BOUNDS"):
+                raise ValueError("missing BOX BOUNDS marker")
+            for _ in range(3):
+                handle.readline()
+            if not handle.readline().startswith("ITEM: ATOMS"):
+                raise ValueError("missing ATOMS marker")
+            for _ in range(atom_count):
+                handle.readline()
+            count += 1
+            if progress_interval > 0 and count % progress_interval == 0:
+                print(f"  counted {count} snapshots in {path.name}", flush=True)
+    return count
+
+
+def load_raw_lammps_trajectory_stats(
+    path: Path,
+    log_path: Path,
+    angle_radians: float = 0.3,
+    progress_interval: int = 500,
+    target_frame_count: int = 1000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """Parse a LAMMPS custom dump with strict snapshot/atom-count checks."""
     dt = timestep_seconds_from_log(log_path)
-    projected_snapshots: list[np.ndarray] = []
+    sin_angle = math.sin(angle_radians)
+    cos_angle = math.cos(angle_radians)
+    means: list[float] = []
+    sems: list[float] = []
     timesteps: list[float] = []
+    expected_atom_count: int | None = None
+    snapshot = np.empty(0, dtype=np.float64)
+    total_snapshots = count_raw_lammps_snapshots(path, progress_interval=max(progress_interval, 5000))
+    if total_snapshots == 0:
+        raise ValueError("dump contains no complete snapshots")
+    if target_frame_count > 0 and total_snapshots > target_frame_count:
+        selected_indices = set(np.rint(np.linspace(0, total_snapshots - 1, target_frame_count)).astype(int).tolist())
+    else:
+        selected_indices = set(range(total_snapshots))
+    print(
+        f"  loading {len(selected_indices)}/{total_snapshots} evenly spaced raw snapshots "
+        f"from {path.name} using log {log_path.name}",
+        flush=True,
+    )
     with path.open(encoding="utf-8", errors="strict") as handle:
+        snapshot_index = 0
         while True:
             marker = handle.readline()
             if not marker:
@@ -168,6 +251,11 @@ def load_raw_lammps_trajectory(path: Path, log_path: Path, angle_radians: float 
             for _ in range(3):
                 if len(handle.readline().split()) < 2:
                     raise ValueError("incomplete box bounds")
+            if expected_atom_count is None:
+                expected_atom_count = atom_count
+                snapshot = np.empty(atom_count, dtype=np.float64)
+            elif atom_count != expected_atom_count:
+                raise ValueError(f"atom count changed between snapshots: {expected_atom_count} then {atom_count}")
             header = handle.readline().split()
             if header[:2] != ["ITEM:", "ATOMS"]:
                 raise ValueError("missing ATOMS marker")
@@ -176,27 +264,34 @@ def load_raw_lammps_trajectory(path: Path, log_path: Path, angle_radians: float 
                 vy_index, vz_index = columns.index("vy"), columns.index("vz")
             except ValueError as exc:
                 raise ValueError(f"velocity columns absent: {columns}") from exc
-            snapshot = np.empty(atom_count, dtype=np.float64)
+            if snapshot_index not in selected_indices:
+                for _ in range(atom_count):
+                    handle.readline()
+                snapshot_index += 1
+                continue
             for atom_index in range(atom_count):
                 fields = handle.readline().split()
                 if len(fields) != len(columns):
                     raise ValueError(f"incomplete atom row {atom_index} at timestep {timestep:g}")
                 snapshot[atom_index] = (
-                    math.sin(angle_radians) * float(fields[vy_index])
-                    + math.cos(angle_radians) * float(fields[vz_index])
+                    sin_angle * float(fields[vy_index])
+                    + cos_angle * float(fields[vz_index])
                 )
-            projected_snapshots.append(snapshot)
+            means.append(float(np.mean(snapshot)))
+            sems.append(float(np.std(snapshot, ddof=1) / math.sqrt(atom_count)))
             timesteps.append(timestep)
-    if not projected_snapshots:
+            if progress_interval > 0 and len(means) % progress_interval == 0:
+                print(f"  parsed {len(means)}/{len(selected_indices)} selected snapshots from {path.name}", flush=True)
+            snapshot_index += 1
+    if not means or expected_atom_count is None:
         raise ValueError("dump contains no complete snapshots")
-    atom_counts = {len(snapshot) for snapshot in projected_snapshots}
-    if len(atom_counts) != 1:
-        raise ValueError(f"atom count changed between snapshots: {sorted(atom_counts)}")
-    velocities = np.vstack(projected_snapshots)
+    mean = np.asarray(means, dtype=np.float64)
+    sem = np.asarray(sems, dtype=np.float64)
     times = np.asarray(timesteps, dtype=np.float64) * dt
     if np.any(np.diff(times) <= 0):
         raise ValueError("dump timesteps are not strictly increasing")
-    return velocities, times
+    print(f"  parsed {len(means)} snapshots x {expected_atom_count} atoms from {path.name}", flush=True)
+    return mean, sem, times, expected_atom_count
 
 
 def intervals_overlap(mean_a: float, sem_a: float, mean_b: float, sem_b: float) -> bool:
@@ -208,15 +303,18 @@ def exp_model(time: np.ndarray, log_amplitude: float, log_tau: float) -> np.ndar
 
 
 def fit_decay(
-    velocities: np.ndarray,
+    mean: np.ndarray,
+    sem: np.ndarray,
     times: np.ndarray,
+    n_atoms: int,
     condition: int,
     nominal_velocity: float,
     source: Path,
     source_hash: str,
     config: FitConfig,
+    progress_interval: int = 500,
 ) -> FitResult:
-    total_rows, n_atoms = velocities.shape
+    total_rows = len(times)
     result = FitResult(
         condition=condition,
         nominal_velocity_cm_s=nominal_velocity,
@@ -235,8 +333,6 @@ def fit_decay(
         result.message = "skip_rows leaves too few observations"
         return result
 
-    mean = np.mean(velocities, axis=1)
-    sem = np.std(velocities, axis=1, ddof=1) / math.sqrt(n_atoms)
     # skip_rows is the first retained row, so the thermalization endpoint is
     # the preceding recorded sample (not the first post-thermalization sample).
     thermalization_end_index = max(0, config.skip_rows - 1)
@@ -298,11 +394,18 @@ def fit_decay(
         minimum_window_duration = config.minimum_window_duration_fraction * full_simulation_duration
         earliest_end_time = float(times[fit_start]) + minimum_window_duration
         first_end_exclusive = max(fit_start + 3, int(np.searchsorted(times, earliest_end_time, side="left")) + 1)
-        candidate_ends = range(first_end_exclusive, maximum_fit_end + 1)
+        candidate_ends = list(range(first_end_exclusive, maximum_fit_end + 1, config.fit_window_stride))
+        if not candidate_ends or candidate_ends[-1] != maximum_fit_end:
+            candidate_ends.append(maximum_fit_end)
         best: tuple[float, object, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         initial_parameters: np.ndarray | None = None
 
-        for candidate_end in candidate_ends:
+        print(
+            f"  fitting {source.name}: {len(candidate_ends)} candidate windows "
+            f"(stride={config.fit_window_stride})",
+            flush=True,
+        )
+        for candidate_number, candidate_end in enumerate(candidate_ends, start=1):
             candidate_time = times[fit_start:candidate_end]
             candidate_mean = mean[fit_start:candidate_end]
             candidate_sem = np.maximum(sem[fit_start:candidate_end], sigma_floor)
@@ -327,7 +430,7 @@ def fit_decay(
                 ),
                 loss="linear",
                 x_scale="jac",
-                max_nfev=5000,
+                max_nfev=config.max_optimizer_evaluations,
             )
             normalized_residuals = residual(fit.x)
             score = float(
@@ -346,6 +449,11 @@ def fit_decay(
                     normalized_residuals,
                 )
             initial_parameters = fit.x
+            if progress_interval > 0 and candidate_number % progress_interval == 0:
+                print(
+                    f"  fitted {candidate_number}/{len(candidate_ends)} candidate windows for {source.name}",
+                    flush=True,
+                )
 
         if best is None:
             result.status = "ignored"
@@ -434,7 +542,8 @@ def write_compatible_results(path: Path, rows: list[FitResult], velocities: np.n
 
 def plot_fit_diagnostic(
     path: Path,
-    velocities: np.ndarray,
+    mean: np.ndarray,
+    sem: np.ndarray,
     times: np.ndarray,
     result: FitResult,
     config: FitConfig,
@@ -446,8 +555,6 @@ def plot_fit_diagnostic(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    mean = np.mean(velocities, axis=1)
-    sem = np.std(velocities, axis=1, ddof=1) / math.sqrt(velocities.shape[1])
     time_scale = max(float(np.max(np.abs(times))), 1.0e-300)
     exponent = int(math.floor(math.log10(time_scale)))
     scaled_time = times / (10.0**exponent)
@@ -583,28 +690,55 @@ def clear_generated_diagnostics(path: Path) -> None:
 
 
 def process_campaign(
-    task: tuple[Path, float, int, str, Path, Path, FitConfig, bool],
+    task: tuple[Path, float, int, str, Path, Path, FitConfig, bool, int, bool, int],
 ) -> tuple[FitResult, str | None]:
     """Worker entry point: load, validate, fit, hash, and optionally plot one campaign."""
-    path, velocity, condition, source_kind, raw_dir, diagnostics_dir, config, make_plot = task
+    (
+        path,
+        velocity,
+        condition,
+        source_kind,
+        raw_dir,
+        diagnostics_dir,
+        config,
+        make_plot,
+        progress_interval,
+        hash_files,
+        raw_target_frames,
+    ) = task
+    start_time = perf_counter()
+    print(f"Starting {path.name}", flush=True)
     try:
         if source_kind == "raw":
-            log_name = path.name.replace("trajvel_", "unforcedvel_").replace(".txt", ".log")
-            velocities, times = load_raw_lammps_trajectory(path, raw_dir / log_name)
+            mean, sem, times, n_atoms = load_raw_lammps_trajectory_stats(
+                path,
+                resolve_lammps_log_path(path, raw_dir),
+                progress_interval=progress_interval,
+                target_frame_count=raw_target_frames,
+            )
         else:
-            velocities, times = load_trajectory(path)
-        result = fit_decay(velocities, times, condition, velocity, path, sha256_file(path), config)
+            mean, sem, times, n_atoms = load_trajectory_stats(path)
+        if hash_files:
+            print(f"  hashing {path.name}", flush=True)
+            source_hash = sha256_file(path)
+        else:
+            source_hash = "not_computed"
+        print(f"  fitting decay for {path.name}", flush=True)
+        result = fit_decay(mean, sem, times, n_atoms, condition, velocity, path, source_hash, config, progress_interval)
         plot_name = None
         if make_plot and result.status != "ignored":
+            print(f"  writing diagnostic plot for {path.name}", flush=True)
             plot_name = f"condition_{condition}_velocity_{velocity:.6e}.png"
-            plot_fit_diagnostic(diagnostics_dir / plot_name, velocities, times, result, config)
+            plot_fit_diagnostic(diagnostics_dir / plot_name, mean, sem, times, result, config)
+        print(f"Finished {path.name} in {perf_counter() - start_time:.1f}s", flush=True)
         return result, plot_name
     except Exception as exc:
+        source_hash = sha256_file(path) if hash_files else "not_computed"
         result = FitResult(
             condition=condition,
             nominal_velocity_cm_s=velocity,
             source_file=path.name,
-            source_sha256=sha256_file(path),
+            source_sha256=source_hash,
             status="failed",
             quality_flags="input_validation_failed",
             n_times_total=0,
@@ -637,7 +771,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=repo_root / "unforced/dataarchive/nprun4_29")
-    parser.add_argument("--raw-dir", type=Path, default=repo_root / "unforced/dataarchive/run4_29")
+    parser.add_argument("--raw-dir", type=Path, default=repo_root / "unforced/daisresults/dais")
     parser.add_argument("--source", choices=["raw", "intermediate"], default="raw")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "output")
     parser.add_argument("--skip-rows", type=int, default=21)
@@ -646,9 +780,51 @@ def main() -> None:
     parser.add_argument("--velocity", type=float, help="Process the discovered nominal velocity nearest this value.")
     parser.add_argument("--workers", type=int, default=8, help="Parallel campaign workers (default: 8).")
     parser.add_argument("--no-plots", action="store_true", help="Skip per-campaign PNG diagnostics and HTML index.")
+    parser.add_argument(
+        "--fit-window-stride",
+        type=int,
+        default=10,
+        help="Try every Nth candidate fit endpoint (1 reproduces the old exhaustive search; default: 10).",
+    )
+    parser.add_argument(
+        "--max-optimizer-evaluations",
+        type=int,
+        default=1000,
+        help="Maximum least-squares function evaluations per candidate window (default: 1000).",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=500,
+        help="Print raw-snapshot and fit-window progress every N items; 0 disables inner progress.",
+    )
+    parser.add_argument(
+        "--no-hash",
+        action="store_true",
+        help="Skip SHA-256 hashes of large source files for faster exploratory runs.",
+    )
+    parser.add_argument(
+        "--raw-target-frames",
+        type=int,
+        default=1000,
+        help="For raw dumps, parse this many evenly spaced snapshots instead of every frame; 0 parses all.",
+    )
     args = parser.parse_args()
 
-    config = FitConfig(skip_rows=args.skip_rows)
+    if args.fit_window_stride < 1:
+        raise SystemExit("--fit-window-stride must be at least 1")
+    if args.max_optimizer_evaluations < 1:
+        raise SystemExit("--max-optimizer-evaluations must be at least 1")
+    if args.progress_interval < 0:
+        raise SystemExit("--progress-interval must be nonnegative")
+    if args.raw_target_frames < 0:
+        raise SystemExit("--raw-target-frames must be nonnegative")
+
+    config = FitConfig(
+        skip_rows=args.skip_rows,
+        fit_window_stride=args.fit_window_stride,
+        max_optimizer_evaluations=args.max_optimizer_evaluations,
+    )
     inputs = discover_raw_inputs(args.raw_dir) if args.source == "raw" else discover_inputs(args.input_dir)
     if args.condition is not None:
         inputs = [item for item in inputs if item[2] == args.condition]
@@ -658,7 +834,9 @@ def main() -> None:
     if args.limit is not None:
         inputs = inputs[: args.limit]
     if not inputs:
-        raise SystemExit(f"No force_*.np inputs found in {args.input_dir}")
+        input_pattern = "trajvel_*.txt" if args.source == "raw" else "force_*.np"
+        searched_dir = args.raw_dir if args.source == "raw" else args.input_dir
+        raise SystemExit(f"No {input_pattern} inputs found in {searched_dir}")
     if args.workers < 1:
         raise SystemExit("--workers must be at least 1")
 
@@ -670,14 +848,25 @@ def main() -> None:
     rows: list[FitResult] = []
     plot_names: dict[str, str] = {}
     tasks = [
-        (path, velocity, condition, args.source, args.raw_dir, diagnostics_dir, config, not args.no_plots)
+        (
+            path,
+            velocity,
+            condition,
+            args.source,
+            args.raw_dir,
+            diagnostics_dir,
+            config,
+            not args.no_plots,
+            args.progress_interval,
+            not args.no_hash,
+            args.raw_target_frames,
+        )
         for path, velocity, condition in inputs
     ]
     print(f"Processing {len(tasks)} campaigns with {args.workers} workers", flush=True)
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(process_campaign, task): task[0].name for task in tasks}
-        for completed, future in enumerate(as_completed(futures), start=1):
-            result, plot_name = future.result()
+    if args.workers == 1:
+        for completed, task in enumerate(tasks, start=1):
+            result, plot_name = process_campaign(task)
             rows.append(result)
             if plot_name:
                 plot_names[result.source_file] = plot_name
@@ -686,6 +875,19 @@ def main() -> None:
                 + (f" ({result.quality_flags})" if result.quality_flags else ""),
                 flush=True,
             )
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(process_campaign, task): task[0].name for task in tasks}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                result, plot_name = future.result()
+                rows.append(result)
+                if plot_name:
+                    plot_names[result.source_file] = plot_name
+                print(
+                    f"[{completed}/{len(tasks)}] {result.source_file}: {result.status}"
+                    + (f" ({result.quality_flags})" if result.quality_flags else ""),
+                    flush=True,
+                )
     rows.sort(key=lambda item: (item.condition, item.nominal_velocity_cm_s))
 
     write_csv(args.output_dir / "fit_results.csv", rows)
@@ -705,6 +907,8 @@ def main() -> None:
         "discovered_inputs": len(all_discovered),
         "processed_inputs": len(rows),
         "workers": args.workers,
+        "source_hashes": "computed" if not args.no_hash else "not_computed",
+        "raw_target_frames": args.raw_target_frames,
         "status_counts": {
             status: sum(row.status == status for row in rows)
             for status in ("ok", "review", "ignored", "failed")

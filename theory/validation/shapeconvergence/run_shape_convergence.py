@@ -13,7 +13,6 @@ from pathlib import Path
 OUTDIR = Path(__file__).resolve().parent
 os.environ.setdefault("MPLCONFIGDIR", str(OUTDIR / ".matplotlib"))
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,7 +21,8 @@ from common import CM_PER_S_TO_M_PER_S, condition_label, make_drag, quiet_drag, 
 CONDITIONS = (1, 3)
 N_VELOCITIES = 16
 ACIPC = 1.0
-DEFAULT_RHOMAX_FRACTIONS = (0.30, 0.35, 0.40)
+CUTOFF_RADIUS_FACTOR = 50.0
+DEFAULT_BMAX_OVER_SPACING = (0.1, 0.178, 0.316, 0.562, 1.0, 1.778, 3.162, 5.623, 10.0)
 DEFAULT_RESOLUTION_SCALES = (0.5, 1.0, 2.0)
 
 
@@ -32,7 +32,7 @@ def fraction_list(text: str) -> tuple[float, ...]:
     except ValueError as exc:
         raise argparse.ArgumentTypeError("use comma-separated numbers") from exc
     if not values or any(not np.isfinite(value) or value <= 0 for value in values):
-        raise argparse.ArgumentTypeError("provide positive rhomax fractions")
+        raise argparse.ArgumentTypeError("provide positive values")
     return values
 
 
@@ -62,19 +62,25 @@ def bragg_focused_velocities(
 
 
 def run_point(task: tuple[int, float, float, float, dict[str, int]]) -> dict[str, object]:
-    condition, velocity_cm_s, rhomax_fraction, resolution_scale, resolution = task
+    condition, velocity_cm_s, bmax_over_spacing, resolution_scale, resolution = task
+    rhomax_fraction = bmax_over_spacing / CUTOFF_RADIUS_FACTOR
     drag = make_drag(
         condition,
         rhomax_fraction=rhomax_fraction,
+        cutoff_radius_factor=CUTOFF_RADIUS_FACTOR,
         acipc=ACIPC,
         **resolution,
     )
     impact_parameter_cutoff_m = drag.rhomax_fraction / drag.ustart
+    hydrogen_interparticle_spacing_m = 1.0 / (CUTOFF_RADIUS_FACTOR * drag.ustart)
     return {
         "condition": condition,
         "velocity_cm_s": velocity_cm_s,
         "drag_N": quiet_drag(drag, velocity_cm_s * CM_PER_S_TO_M_PER_S),
         "rhomax_fraction": rhomax_fraction,
+        "bmax_over_hydrogen_interparticle_spacing": bmax_over_spacing,
+        "hydrogen_interparticle_spacing_m": hydrogen_interparticle_spacing_m,
+        "cutoff_radius_factor": CUTOFF_RADIUS_FACTOR,
         "acipc": drag.acipc,
         "impact_parameter_cutoff_m": impact_parameter_cutoff_m,
         "angle_radius_cutoff_m": drag.acipc * impact_parameter_cutoff_m,
@@ -86,7 +92,13 @@ def run_point(task: tuple[int, float, float, float, dict[str, int]]) -> dict[str
 
 
 def check_zero_force(condition: int, resolution: dict[str, int], tolerance_n: float) -> float:
-    drag = make_drag(condition, rhomax_fraction=0.3, acipc=ACIPC, **resolution)
+    drag = make_drag(
+        condition,
+        rhomax_fraction=1.0 / CUTOFF_RADIUS_FACTOR,
+        cutoff_radius_factor=CUTOFF_RADIUS_FACTOR,
+        acipc=ACIPC,
+        **resolution,
+    )
     drag.A = 0.0
     drag.E0Y = 0.0
     force = quiet_drag(drag, 1.0e6 * CM_PER_S_TO_M_PER_S)
@@ -100,20 +112,22 @@ def check_zero_force(condition: int, resolution: dict[str, int], tolerance_n: fl
 def make_plot(
     rows: list[dict[str, object]],
     condition: int,
-    fractions: tuple[float, ...],
+    bmax_over_spacing_values: tuple[float, ...],
     resolution_scales: tuple[float, ...],
 ) -> None:
+    import matplotlib.pyplot as plt
+
     fig, axis = plt.subplots(figsize=(9, 6))
     color_maps = {0: plt.cm.Reds, 1: plt.cm.YlOrBr, 2: plt.cm.Greens, 3: plt.cm.Blues}
-    colors = color_maps[condition](np.linspace(0.35, 0.9, len(fractions)))
+    colors = color_maps[condition](np.linspace(0.35, 0.9, len(bmax_over_spacing_values)))
     linestyles = ["--", "-", ":", "-."]
-    for color, fraction in zip(colors, fractions):
+    for color, bmax_over_spacing in zip(colors, bmax_over_spacing_values):
         for scale_index, scale in enumerate(resolution_scales):
             curve = sorted(
                 (
                     row for row in rows
                     if row["condition"] == condition
-                    and row["rhomax_fraction"] == fraction
+                    and row["bmax_over_hydrogen_interparticle_spacing"] == bmax_over_spacing
                     and row["resolution_scale"] == scale
                 ),
                 key=lambda row: float(row["velocity_cm_s"]),
@@ -129,7 +143,7 @@ def make_plot(
                 color=color,
                 linewidth=2.0,
                 markersize=4,
-                label=rf"$b_{{max}}/a_H={fraction:g}$, resolution $\times${scale:g}",
+                label=rf"$b_{{max}}/a_H={bmax_over_spacing:g}$, resolution $\times${scale:g}",
             )
             invalid = ~valid
             if np.any(invalid):
@@ -147,7 +161,7 @@ def make_plot(
     axis.set_ylabel("|drag| [N]")
     axis.set_title(
         f"Condition {condition}: {condition_label(condition)}, "
-        f"finite-start correction, acipc={ACIPC:g}"
+        f"finite-start correction, acipc={ACIPC:g}, launch radius={CUTOFF_RADIUS_FACTOR:g} $a_H$"
     )
     axis.grid(True, which="both", alpha=0.25)
     axis.legend(ncol=2, fontsize=8)
@@ -166,7 +180,12 @@ def main() -> None:
     parser.add_argument("--max-velocity-cm-s", type=float, default=1e8)
     parser.add_argument("--bragg-min-velocity-cm-s", type=float, default=1e6)
     parser.add_argument("--bragg-max-velocity-cm-s", type=float, default=3e7)
-    parser.add_argument("--rhomax-fractions", type=fraction_list, default=DEFAULT_RHOMAX_FRACTIONS)
+    parser.add_argument(
+        "--bmax-over-spacing",
+        type=fraction_list,
+        default=DEFAULT_BMAX_OVER_SPACING,
+        help="Comma-separated impact-parameter cutoffs in units of hydrogen interparticle spacing a_H.",
+    )
     parser.add_argument(
         "--resolution-scales",
         type=fraction_list,
@@ -208,15 +227,16 @@ def main() -> None:
     tasks = [
         (condition, float(velocity), fraction, scale, resolution)
         for condition in conditions
-        for fraction in args.rhomax_fractions
+        for fraction in args.bmax_over_spacing
         for scale, resolution in resolutions.items()
         for velocity in velocities
     ]
     print(
         f"Conditions {conditions}: 16 Bragg-focused velocities x "
-        f"{len(args.rhomax_fractions)} bmax/aH values x {len(resolutions)} resolution levels "
+        f"{len(args.bmax_over_spacing)} bmax/aH values x {len(resolutions)} resolution levels "
         f"= {len(tasks)} jobs "
-        f"on up to {args.workers} processes; acipc={ACIPC:g}.",
+        f"on up to {args.workers} processes; acipc={ACIPC:g}, "
+        f"launch radius={CUTOFF_RADIUS_FACTOR:g} aH.",
         flush=True,
     )
     start = time.perf_counter()
@@ -232,19 +252,27 @@ def main() -> None:
     rows.sort(
         key=lambda row: (
             int(row["condition"]),
-            float(row["rhomax_fraction"]),
+            float(row["bmax_over_hydrogen_interparticle_spacing"]),
             float(row["resolution_scale"]),
             float(row["velocity_cm_s"]),
         )
     )
     reference_scale = max(args.resolution_scales)
     reference_drag = {
-        (int(row["condition"]), float(row["rhomax_fraction"]), float(row["velocity_cm_s"])): float(row["drag_N"])
+        (
+            int(row["condition"]),
+            float(row["bmax_over_hydrogen_interparticle_spacing"]),
+            float(row["velocity_cm_s"]),
+        ): float(row["drag_N"])
         for row in rows
         if float(row["resolution_scale"]) == reference_scale
     }
     for row in rows:
-        key = (int(row["condition"]), float(row["rhomax_fraction"]), float(row["velocity_cm_s"]))
+        key = (
+            int(row["condition"]),
+            float(row["bmax_over_hydrogen_interparticle_spacing"]),
+            float(row["velocity_cm_s"]),
+        )
         value = float(row["drag_N"])
         reference = reference_drag.get(key, np.nan)
         row["reference_resolution_scale"] = reference_scale
@@ -256,7 +284,7 @@ def main() -> None:
         row["status"] = "ok" if np.isfinite(value) and value > 0.0 else "invalid_drag"
     write_csv(OUTDIR / "rhomax_fraction_shape_convergence.csv", rows)
     for condition in conditions:
-        make_plot(rows, condition, args.rhomax_fractions, args.resolution_scales)
+        make_plot(rows, condition, args.bmax_over_spacing, args.resolution_scales)
     print(f"Finished in {(time.perf_counter()-start)/60:.1f} min.", flush=True)
 
 

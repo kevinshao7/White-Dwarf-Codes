@@ -23,12 +23,12 @@ from run_impact_parameter_fit import (
     run_fit_point_case,
     select_fit_points,
     write_csv,
+    FIT_PARAMETER,
 )
 
 
 OUTDIR = Path(__file__).resolve().parent
 FIXED_BMAX_OVER_AH = 1.0
-FIT_PARAMETER = "rhomax-spacing"
 
 
 def point_diagnostic(task: tuple[int, float, str, object, int, int, int, int]) -> dict[str, object]:

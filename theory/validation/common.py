@@ -18,6 +18,7 @@ if str(THEORY_DIR) not in sys.path:
 from dragbase2 import DragFourth
 
 CM_PER_S_TO_M_PER_S = 1.0e-2
+DEFAULT_CUTOFF_RADIUS_FACTOR = 50.0
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -36,7 +37,7 @@ def make_drag(
     rhores: int = 180,
     ures: int = 180,
     dphires: int = 180,
-    cutoff_radius_factor: float = 50.,
+    cutoff_radius_factor: float = DEFAULT_CUTOFF_RADIUS_FACTOR,
     vrel_sigma_width: float = 4.0,
     rhomax_fraction: float = 0.3,
     dphi_endpoint_fraction: float = 1.0e-5,
@@ -62,6 +63,8 @@ def make_drag(
 
 
 def set_cutoff_radius_factor(drag: DragFourth, factor: float) -> None:
+    if factor <= 0.0:
+        raise ValueError("cutoff_radius_factor must be positive")
     radius = factor / drag.ustart
     drag.ustart = 1.0 / radius
     drag.E0Y = drag.A * np.exp(-drag.k0 / drag.ustart) * drag.ustart

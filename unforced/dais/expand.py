@@ -4,7 +4,15 @@ import scipy as scp
 #use 30 cpus to maximize usage
 #for f in *.sh; do sbatch "$f"; done
 #cd   /dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/
+"""
+C:\Users\shaoq\Documents\White Dwarfs\White Dwarf Codes\unforced\daisresults
 
+& "C:\Program Files\Git\usr\bin\scp.exe" -r -o "ProxyJump=kshao@gate1.mpcdf.mpg.de" "kshao@dais11:/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/" "/c/Users/shaoq/Documents/White Dwarfs/White Dwarf Codes/unforced/daisresults"
+
+
+
+
+"""
 velarr=np.logspace(5,7.2,10)#relative velocity cm/s
 gccarr =  np.array([1e-5,1,1e-5,1])
 Tarr = np.array([5000,5000,1e5,1e5])

@@ -20,14 +20,24 @@ import numpy as np
 from scipy.optimize import least_squares
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import CM_PER_S_TO_M_PER_S, condition_label, make_drag, quiet_drag, write_csv
+from common import (
+    CM_PER_S_TO_M_PER_S,
+    DEFAULT_CUTOFF_RADIUS_FACTOR,
+    condition_label,
+    make_drag,
+    quiet_drag,
+    write_csv,
+)
+from resolution_scaling import scaled_resolution_for_bmax
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALL_CONDITIONS = (0, 1, 2, 3)
+DAIS_CONDITIONS = (0, 2)
 STRONGLY_COUPLED_CONDITIONS = (1, 3)
-FIT_CONDITIONS = (1, 3)
+FIT_CONDITIONS = ALL_CONDITIONS
 COUPLING_PARAMETER = {0: 0.03, 1: 1.94, 2: 0.42, 3: 1.05}
 LAMMPS_SOURCE_RE = re.compile(r"\[(\d+),(\d+),(\d+)\]$")
+FIT_PARAMETER = "bmax/aH"
 
 
 @dataclass(frozen=True)
@@ -102,6 +112,26 @@ def load_lammps_expfit_points(results_path: Path, conditions: set[int], samples_
                     )
                 )
     return points
+
+
+def load_default_points(
+    lammps_results_path: Path,
+    dais_results_path: Path,
+    conditions: set[int],
+    samples_per_fit: int,
+) -> list[DataPoint]:
+    dais_conditions = conditions.intersection(DAIS_CONDITIONS)
+    lammps_conditions = conditions.difference(DAIS_CONDITIONS)
+    points: list[DataPoint] = []
+    if lammps_conditions:
+        points.extend(load_lammps_expfit_points(lammps_results_path, lammps_conditions, samples_per_fit))
+    if dais_conditions:
+        points.extend(load_lammps_expfit_points(dais_results_path, dais_conditions, samples_per_fit))
+    return points
+
+
+def default_data_source_label(args: argparse.Namespace) -> str:
+    return f"lammps={args.lammps_results}; dais={args.dais_results}"
 
 
 def load_points_from_csv(path: Path, conditions: set[int]) -> list[DataPoint]:
@@ -292,20 +322,25 @@ def make_drag_for_fit(
     ures: int,
     dphires: int,
 ):
-    if fit_parameter == "rhomax-spacing":
-        return make_drag(condition, vres=vres, rhores=rhores, ures=ures, dphires=dphires, rhomax_fraction=fit_value)
-    if fit_parameter == "rhomax":
-        probe = make_drag(condition, vres=vres, rhores=rhores, ures=ures, dphires=dphires)
+    if fit_parameter == FIT_PARAMETER:
+        if fit_value <= 0.0:
+            raise ValueError("bmax/aH must be positive")
+        rhomax_fraction = fit_value / DEFAULT_CUTOFF_RADIUS_FACTOR
+        if rhomax_fraction > 1.0:
+            raise ValueError(
+                f"bmax/aH={fit_value:g} exceeds the fixed launch radius "
+                f"{DEFAULT_CUTOFF_RADIUS_FACTOR:g} aH"
+            )
+        scaled_resolution = scaled_resolution_for_bmax(
+            {"vres": vres, "rhores": rhores, "ures": ures, "dphires": dphires},
+            fit_value,
+        )
         return make_drag(
             condition,
-            vres=vres,
-            rhores=rhores,
-            ures=ures,
-            dphires=dphires,
-            rhomax_fraction=fit_value * probe.lD * probe.ustart,
+            **scaled_resolution,
+            rhomax_fraction=rhomax_fraction,
+            cutoff_radius_factor=DEFAULT_CUTOFF_RADIUS_FACTOR,
         )
-    if fit_parameter == "outer-radius":
-        return make_drag(condition, vres=vres, rhores=rhores, ures=ures, dphires=dphires, cutoff_radius_factor=fit_value)
     raise ValueError(f"Unknown fit parameter: {fit_parameter}")
 
 
@@ -317,7 +352,7 @@ def prediction_metadata(drag, fit_value: float, fit_parameter: str) -> dict[str,
     ion_screening_length_m = ion_screening_length(drag)
     yukawa_screening_length_m = 1.0 / drag.k0
     impact_parameter_upper_bound_m = drag.rhomax_fraction / drag.ustart
-    interparticle_spacing_m = 1.0 / drag.ustart
+    interparticle_spacing_m = (1.0 / drag.ustart) / DEFAULT_CUTOFF_RADIUS_FACTOR
     return {
         "rhomax_fraction_of_interparticle_spacing": float(impact_parameter_upper_bound_m / interparticle_spacing_m),
         "rhomax_fraction_of_debye_length": float(impact_parameter_upper_bound_m / drag.lD),
@@ -330,6 +365,8 @@ def prediction_metadata(drag, fit_value: float, fit_parameter: str) -> dict[str,
         "impact_parameter_upper_bound_m": float(impact_parameter_upper_bound_m),
         "outer_radius_m": float(1.0 / drag.ustart),
         "hydrogen_interparticle_spacing_m": float(interparticle_spacing_m),
+        "impact_parameter_resolution_rhores": int(drag.rhores),
+        "scattering_angle_resolution_dphires": int(drag.dphires),
     }
 
 
@@ -339,6 +376,8 @@ def progress_print(enabled: bool, message: str) -> None:
 
 
 def default_fit_initial(fit_min: float, fit_max: float) -> float:
+    if fit_min <= 1.0 <= fit_max:
+        return 1.0
     if fit_min > 0.0 and np.isfinite(fit_max):
         return math.sqrt(fit_min * fit_max)
     if fit_min == 0.0 and np.isfinite(fit_max):
@@ -585,10 +624,8 @@ def run_curve_case(task: tuple[int, float, float, str, float, int, int, int, int
 
 
 def fit_value_label(fit_parameter: str) -> str:
-    if fit_parameter == "rhomax-spacing":
+    if fit_parameter == FIT_PARAMETER:
         return "bmax/aH"
-    if fit_parameter == "rhomax":
-        return "bmax/lD"
     return fit_parameter
 
 
@@ -765,20 +802,17 @@ def main() -> None:
         type=int,
         default=list(FIT_CONDITIONS),
         choices=FIT_CONDITIONS,
-        help="Conditions to fit; restricted to the well-sampled conditions 1 and 3.",
+        help="Conditions to fit. Cases 0 and 2 are loaded from --dais-results by default.",
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
         "--fit-parameter",
-        choices=["rhomax-spacing", "rhomax", "outer-radius"],
-        default="rhomax-spacing",
-        help=(
-            "rhomax-spacing fits bmax/aH, where aH is the hydrogen interparticle spacing; "
-            "rhomax fits bmax/lD; outer-radius fits the starting radius relative to the default interparticle spacing."
-        ),
+        choices=[FIT_PARAMETER],
+        default=FIT_PARAMETER,
+        help="Only bmax/aH is fitted; the finite launch radius and angle radial cutoff stay fixed.",
     )
     parser.add_argument("--fit-min", type=float, default=0.0)
-    parser.add_argument("--fit-max", type=float, default=math.inf)
+    parser.add_argument("--fit-max", type=float, default=DEFAULT_CUTOFF_RADIUS_FACTOR)
     parser.add_argument(
         "--fit-initial",
         type=float,
@@ -792,9 +826,15 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "theory" / "dataprocessing" / "output" / "results.npy",
         help=(
-            "Velocity-decay fit array shaped (condition, campaign, 6). "
-            "Defaults to the reliability-filtered output from theory/dataprocessing."
+            "Velocity-decay fit array shaped (condition, campaign, 6) for non-DAIS conditions. "
+            "Defaults to the reliability-filtered output from theory/dataprocessing/output."
         ),
+    )
+    parser.add_argument(
+        "--dais-results",
+        type=Path,
+        default=REPO_ROOT / "theory" / "dataprocessing" / "output_dais" / "results.npy",
+        help="Velocity-decay fit array for DAIS conditions 0 and 2.",
     )
     parser.add_argument("--samples-per-lammps-fit", type=int, default=10)
     parser.add_argument(
@@ -809,12 +849,14 @@ def main() -> None:
     parser.add_argument("--curve-points", type=int, default=24)
     parser.add_argument("--quiet", action="store_true", help="Suppress per-residual and best-fit-curve progress prints.")
     parser.add_argument("--vres", type=int, default=50)
-    parser.add_argument("--rhores", type=int, default=180)
+    parser.add_argument("--rhores", type=int, default=180, help="Impact-parameter bin count at bmax/aH=1.")
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
     args = parser.parse_args()
     if args.fit_min < 0.0 or args.fit_max <= args.fit_min:
         raise SystemExit("--fit-min must be >= 0 and --fit-max must be greater than --fit-min.")
+    if args.rhores < 1:
+        raise SystemExit("--rhores is the bin count at bmax/aH=1 and must be positive.")
 
     requested_conditions = set(args.conditions)
     unknown_conditions = requested_conditions.difference(FIT_CONDITIONS)
@@ -827,7 +869,12 @@ def main() -> None:
     if args.data_csv:
         all_points = load_points_from_csv(args.data_csv, requested_conditions)
     else:
-        all_points = load_lammps_expfit_points(args.lammps_results, requested_conditions, args.samples_per_lammps_fit)
+        all_points = load_default_points(
+            args.lammps_results,
+            args.dais_results,
+            requested_conditions,
+            args.samples_per_lammps_fit,
+        )
     all_points = filter_points(all_points, args.min_velocity_cm_s, args.max_velocity_cm_s, args.max_relative_sigma)
     available_conditions = {point.condition for point in all_points}
     omitted_conditions = sorted(requested_conditions.difference(available_conditions))
@@ -835,7 +882,7 @@ def main() -> None:
         {
             "condition": condition,
             "reason": "no usable retained velocity-decay fits after data-processing and impact-fit filters",
-            "data_source": str(args.data_csv if args.data_csv else args.lammps_results),
+            "data_source": str(args.data_csv) if args.data_csv else default_data_source_label(args),
         }
         for condition in omitted_conditions
     ]
@@ -898,16 +945,10 @@ def main() -> None:
             bmax_over_ion_screening_sigma = math.nan
             bmax_over_yukawa_sigma = math.nan
             if np.isfinite(fit_sigma):
-                if fit_parameter == "rhomax-spacing":
-                    bmax_over_interparticle_sigma = fit_sigma
-                    bmax_over_debye_sigma = fit_sigma * interparticle_spacing / debye_length
-                    bmax_over_ion_screening_sigma = fit_sigma * interparticle_spacing / ion_screening
-                    bmax_over_yukawa_sigma = fit_sigma * interparticle_spacing / yukawa_length
-                elif fit_parameter == "rhomax":
-                    bmax_over_interparticle_sigma = fit_sigma * debye_length / interparticle_spacing
-                    bmax_over_debye_sigma = fit_sigma
-                    bmax_over_ion_screening_sigma = fit_sigma * debye_length / ion_screening
-                    bmax_over_yukawa_sigma = fit_sigma * debye_length / yukawa_length
+                bmax_over_interparticle_sigma = fit_sigma
+                bmax_over_debye_sigma = fit_sigma * interparticle_spacing / debye_length
+                bmax_over_ion_screening_sigma = fit_sigma * interparticle_spacing / ion_screening
+                bmax_over_yukawa_sigma = fit_sigma * interparticle_spacing / yukawa_length
             summary_rows.append(
                 {
                     "condition": condition,

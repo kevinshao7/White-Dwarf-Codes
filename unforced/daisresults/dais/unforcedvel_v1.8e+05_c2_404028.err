@@ -1,0 +1,3 @@
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+[2026-08-05T19:48:52.013] error: *** STEP 404028.0 ON daisg112 CANCELLED AT 2026-08-05T19:48:52 DUE TO TIME LIMIT ***
+[2026-08-05T19:48:52.015] error: *** JOB 404028 ON daisg112 CANCELLED AT 2026-08-05T19:48:52 DUE TO TIME LIMIT ***

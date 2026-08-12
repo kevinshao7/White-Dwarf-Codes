@@ -49,9 +49,6 @@ class DragFourth:
         self.k0 = 1/lS #screening length in m
         self.A = (self.qe**2)*self.z1*self.z2/(4*self.pi*self.e0)
         self.E0Y = self.A*np.exp(-self.k0/self.ustart)*self.ustart #background energy Yukawa at rmax/umin
-        #test no force
-        # self.A = 0.0
-        # self.E0Y = 0.0
     def rhostarttorhoinf(self,rhostart,vstart,Estart): #convert between impact parameter at starting length to infinite length
         #rhostart*vstart= rhoinf*vinf
         #vectorized in rho 
@@ -159,7 +156,7 @@ class DragFourth:
     def dphiYFree_outer_cutoff(self,rho,E,u0):
         """Integrate Yukawa-minus-free outer angle without cancellation."""
         results = np.zeros(len(rho))
-        angle_radius_cutoff = self.rhomax_fraction/self.ustart
+        angle_radius_cutoff = self.acipc*self.rhomax_fraction/self.ustart
         cutoff_umax = 1/angle_radius_cutoff
         frac = self.dphi_endpoint_fraction
         for i in range(len(rho)):
