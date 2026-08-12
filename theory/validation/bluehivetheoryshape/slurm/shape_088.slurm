@@ -13,6 +13,7 @@ set -euo pipefail
 
 module load python3/3.11.10
 source /home/kshao4/env/bin/activate
+python3 -c "import numpy, scipy"
 
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p logs task_results

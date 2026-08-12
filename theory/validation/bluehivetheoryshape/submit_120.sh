@@ -3,6 +3,8 @@ set -euo pipefail
 
 module load python3/3.11.10
 source /home/kshao4/env/bin/activate
+python3 -c "import numpy, scipy"
+command -v sbatch >/dev/null 2>&1 || { echo "sbatch not found; run this from a BlueHive login node with SLURM available."; exit 1; }
 
 python3 generate_tasks.py
 python3 generate_slurm_files.py
