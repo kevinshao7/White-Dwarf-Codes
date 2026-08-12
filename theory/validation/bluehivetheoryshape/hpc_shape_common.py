@@ -4,6 +4,7 @@ import csv
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -119,6 +120,15 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
             f"{DEFAULT_CUTOFF_RADIUS_FACTOR:g} aH"
         )
 
+    start = time.perf_counter()
+    print(
+        "[start] "
+        f"task_id={int(task['task_id'])} condition={condition} "
+        f"velocity_cm_s={velocity_cm_s:.6e} bmax/aH={bmax_over_aH:g} "
+        f"vres={vres} rhores={rhores} ures={ures} dphires={dphires}",
+        flush=True,
+    )
+
     drag = make_drag(
         condition,
         vres=vres,
@@ -129,6 +139,14 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
         cutoff_radius_factor=DEFAULT_CUTOFF_RADIUS_FACTOR,
     )
     force_n = quiet_drag(drag, velocity_cm_s * CM_PER_S_TO_M_PER_S)
+    elapsed_s = time.perf_counter() - start
+    print(
+        "[done] "
+        f"task_id={int(task['task_id'])} condition={condition} "
+        f"velocity_cm_s={velocity_cm_s:.6e} bmax/aH={bmax_over_aH:g} "
+        f"drag_N={force_n:.6e} elapsed_min={elapsed_s/60.0:.2f}",
+        flush=True,
+    )
     acceleration_cm_s2 = abs(force_n / drag.ms) * 100.0
     hydrogen_interparticle_spacing_m = 1.0 / (DEFAULT_CUTOFF_RADIUS_FACTOR * drag.ustart)
     finite_radius_m = 1.0 / drag.ustart
@@ -165,7 +183,28 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
 
 
 def run_condition_velocity_task(task: dict[str, str | int | float]) -> list[dict[str, object]]:
-    return [run_curve_point(task, bmax_over_aH) for bmax_over_aH in BMAX_OVER_AH]
+    task_start = time.perf_counter()
+    print(
+        "[task start] "
+        f"task_id={int(task['task_id'])} condition={int(task['condition'])} "
+        f"velocity_cm_s={float(task['velocity_cm_s']):.6e} bmax_count={len(BMAX_OVER_AH)}",
+        flush=True,
+    )
+    rows = []
+    for index, bmax_over_aH in enumerate(BMAX_OVER_AH, 1):
+        print(
+            "[task progress] "
+            f"task_id={int(task['task_id'])} bmax_index={index}/{len(BMAX_OVER_AH)}",
+            flush=True,
+        )
+        rows.append(run_curve_point(task, bmax_over_aH))
+    elapsed_s = time.perf_counter() - task_start
+    print(
+        "[task done] "
+        f"task_id={int(task['task_id'])} elapsed_min={elapsed_s/60.0:.2f}",
+        flush=True,
+    )
+    return rows
 
 
 def add_shape_columns(rows: list[dict[str, object]]) -> None:
