@@ -20,6 +20,7 @@ class DragFourth:
     Z2arr = np.array([0.26,3.82,4.27,3.81],dtype=np.float64)
     gccarr =  np.array([1e-5,1,1e-5,1],dtype=np.float64)
     Tarr = np.array([5000,5000,1e5,1e5],dtype=np.float64)
+    _legendre_cache = {}
     def __init__(self,conditions,vres=100,rhores=300,ures=100,dphires=100,vrel_sigma_width=4.0,rhomax_fraction=0.3,dphi_endpoint_fraction=1e-5,acipc=1.0):
         self.vres=vres #resolution of velocity integration
         self.rhores=rhores #resolution of impact parameter integration
@@ -49,6 +50,44 @@ class DragFourth:
         self.k0 = 1/lS #screening length in m
         self.A = (self.qe**2)*self.z1*self.z2/(4*self.pi*self.e0)
         self.E0Y = self.A*np.exp(-self.k0/self.ustart)*self.ustart #background energy Yukawa at rmax/umin
+    @classmethod
+    def _legendre_nodes_weights(cls, steps):
+        steps = int(steps)
+        if steps < 1:
+            raise ValueError("quadrature steps must be positive")
+        cached = cls._legendre_cache.get(steps)
+        if cached is None:
+            nodes, weights = np.polynomial.legendre.leggauss(steps)
+            x = 0.5*(nodes + 1.0)
+            w = 0.5*weights
+            cached = (x.astype(np.float64), w.astype(np.float64))
+            cls._legendre_cache[steps] = cached
+        return cached
+    def _upper_clustered_nodes_weights(self, lower, upper, steps):
+        if upper <= lower:
+            return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+        x, w = self._legendre_nodes_weights(steps)
+        width = upper - lower
+        # u=upper-width*x^2 removes the sqrt endpoint singularity at upper.
+        u = upper - width*np.square(x)
+        weights = w*2.0*width*x
+        return u, weights
+    def _checked_sqrt(self, arg, context):
+        arg = np.asarray(arg, dtype=np.float64)
+        scale = max(1.0, float(np.nanmax(np.abs(arg))) if arg.size else 1.0)
+        tolerance = 1.0e-12*scale
+        if np.any(arg < -tolerance):
+            minimum = float(np.nanmin(arg))
+            raise FloatingPointError(f"{context}: negative sqrt argument {minimum:.6e}")
+        return np.sqrt(np.maximum(arg, 0.0))
+    def _checked_dot_integral(self, values, weights, context):
+        values = np.asarray(values, dtype=np.float64)
+        weights = np.asarray(weights, dtype=np.float64)
+        finite = np.isfinite(values) & np.isfinite(weights)
+        if not np.all(finite):
+            bad = int(values.size - np.count_nonzero(finite))
+            raise FloatingPointError(f"{context}: {bad} non-finite quadrature values")
+        return float(np.dot(values, weights))
     def rhostarttorhoinf(self,rhostart,vstart,Estart): #convert between impact parameter at starting length to infinite length
         #rhostart*vstart= rhoinf*vinf
         #vectorized in rho 
@@ -107,13 +146,14 @@ class DragFourth:
     def dphiint(self,u,rho,E,C): #vectorized in u, scalar in E
         coulomb_arg = 1-(rho*u)**2-C*u/E
         yukawa_arg = 1-(rho*u)**2-u*self.A*np.exp(-self.k0/u)/E
-        sqrt_coulomb = np.sqrt(coulomb_arg)
-        sqrt_yukawa = np.sqrt(yukawa_arg)
+        sqrt_coulomb = self._checked_sqrt(coulomb_arg, "dphi coulomb")
+        sqrt_yukawa = self._checked_sqrt(yukawa_arg, "dphi yukawa")
         # Y-C with sqrt(a)-sqrt(b) rationalized as (a-b)/(sqrt(a)+sqrt(b)).
         difference = u*(self.A*np.exp(-self.k0/u)-C)/E
         return rho*difference/(sqrt_coulomb*sqrt_yukawa*(sqrt_coulomb+sqrt_yukawa))
     def Yint(self,u,rho,E): #vectorized in u
-        return rho/(np.sqrt(1-((rho*u)**2)-(u*self.A*np.exp(-self.k0/u))/E))
+        arg = 1-((rho*u)**2)-(u*self.A*np.exp(-self.k0/u))/E
+        return rho/self._checked_sqrt(arg, "Yint")
 
     def Cint(self,u,rho,E,C): #vectorized in u, scalar in E
         arg = 1 - (rho*u)**2 - C*u/E
@@ -132,12 +172,13 @@ class DragFourth:
             Ci = C[i]
             umin = min(1e-12*self.ustart,frac*u0[i])
             umax = (1-frac)*u0[i]
-            uarr = np.linspace(umin,umax,steps)
+            uarr, weights = self._upper_clustered_nodes_weights(umin,umax,steps)
             # plt.plot(uarr,np.abs(self.dphiint(uarr,rhoi,E,C[i])))
             # plt.xscale("log")
             # plt.yscale("log")
             # plt.show()
-            results[i] = np.nansum(self.dphiint(uarr,rhoi,E,Ci))*(uarr[1]-uarr[0])#vectorized in uarr
+            integrand = self.dphiint(uarr,rhoi,E,Ci)
+            results[i] = self._checked_dot_integral(integrand, weights, "dphi")
         return results
     def phiY_outer_cutoff(self,rho,E,u0):
         """Integrate Yukawa orbital angle from infinity to the angle cutoff."""
@@ -150,8 +191,9 @@ class DragFourth:
             integration_umin = min(1e-12*self.ustart,frac*integration_umax)
             if integration_umax <= integration_umin:
                 continue
-            uarr = np.linspace(integration_umin,integration_umax,self.dphires)
-            results[i] = np.nansum(self.Yint(uarr,rho[i],E))*(uarr[1]-uarr[0])
+            uarr, weights = self._upper_clustered_nodes_weights(integration_umin,integration_umax,self.dphires)
+            integrand = self.Yint(uarr,rho[i],E)
+            results[i] = self._checked_dot_integral(integrand, weights, "phiY_outer_cutoff")
         return results
     def dphiYFree_outer_cutoff(self,rho,E,u0):
         """Integrate Yukawa-minus-free outer angle without cancellation."""
@@ -164,16 +206,16 @@ class DragFourth:
             integration_umin = min(1e-12*self.ustart,frac*integration_umax)
             if integration_umax <= integration_umin:
                 continue
-            uarr = np.linspace(integration_umin,integration_umax,self.dphires)
+            uarr, weights = self._upper_clustered_nodes_weights(integration_umin,integration_umax,self.dphires)
             rhoi = rho[i]
             free_arg = 1-(rhoi*uarr)**2
             yukawa_term = uarr*self.A*np.exp(-self.k0/uarr)/E
             yukawa_arg = free_arg-yukawa_term
-            sqrt_free = np.sqrt(free_arg)
-            sqrt_yukawa = np.sqrt(yukawa_arg)
+            sqrt_free = self._checked_sqrt(free_arg, "outer free")
+            sqrt_yukawa = self._checked_sqrt(yukawa_arg, "outer yukawa")
             # Y-free, rationalized to avoid subtracting nearly equal roots.
             integrand = rhoi*yukawa_term/(sqrt_free*sqrt_yukawa*(sqrt_free+sqrt_yukawa))
-            results[i] = np.nansum(integrand)*(uarr[1]-uarr[0])
+            results[i] = self._checked_dot_integral(integrand, weights, "dphiYFree_outer_cutoff")
         return results
     def scattering_half_angle(self,rho,E):
         """Return the finite-start theta/2 using a Rutherford reference.

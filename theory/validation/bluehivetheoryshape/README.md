@@ -1,8 +1,9 @@
 # BlueHive Theory Shape Sweep
 
 This folder contains a 120-job BlueHive version of the impact-parameter shape
-sweep.  Each job requests one CPU and computes all seven `bmax/aH` cutoffs for
-one `(condition, velocity)` pair.
+sweep. Each job requests one CPU and computes one `(condition, velocity)` pair.
+The impact integral is evaluated once on a shared log-spaced launch-impact grid
+out to `bmax/aH = 10`, then partial sums are used for smaller cutoffs.
 
 The cutoff list is:
 
@@ -10,15 +11,25 @@ The cutoff list is:
 0.1, 0.2, 0.5, 1, 2, 5, 10
 ```
 
-At `bmax/aH = 0.1`, the impact grid uses `rhores = 10`, while the radial and
-scattering-angle quadratures use `ures = dphires = 100`.
+The shared launch-impact grid uses:
 
-Resolution scaling:
+```text
+rhores = 10000
+impact_grid = log
+min_impact_over_max = 1e-6
+max_bmax/aH = 10
+ures = dphires = 100
+```
+
+This replaces the older independent per-cutoff equal-area resolution scaling:
 
 ```text
 rhores = 10 * (bmax/0.1)^2
 ures = dphires = 100 * (bmax/0.1)
 ```
+
+Because every cutoff now uses the same bin contributions, the reported lower
+`bmax/aH` values are cumulative subsets of the `bmax/aH = 10` calculation.
 
 The job layout is:
 

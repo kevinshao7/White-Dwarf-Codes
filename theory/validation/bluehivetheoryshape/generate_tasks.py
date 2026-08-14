@@ -5,10 +5,15 @@ from pathlib import Path
 
 from hpc_shape_common import (
     CONDITIONS,
+    BMAX_OVER_AH,
     DEFAULT_CURVE_POINTS,
     DEFAULT_MAX_VELOCITY_CM_S,
     DEFAULT_MIN_VELOCITY_CM_S,
     DEFAULT_VRES,
+    IMPACT_GRID,
+    MIN_IMPACT_OVER_MAX,
+    SHARED_BMAX_OVER_AH,
+    SHARED_RHORES,
     TASKS_CSV,
     log_velocity_grid,
     write_rows_csv,
@@ -43,7 +48,11 @@ def main() -> None:
     write_rows_csv(args.output_csv, rows)
     print(f"Wrote {args.output_csv}")
     print(f"Generated {len(rows)} condition-velocity tasks.")
-    print("Each task computes all 7 bmax/aH values.")
+    print(f"Each task computes bmax/aH={list(BMAX_OVER_AH)} from one shared grid.")
+    print(
+        f"Shared grid: {IMPACT_GRID} launch-impact spacing, rhores={SHARED_RHORES}, "
+        f"max bmax/aH={SHARED_BMAX_OVER_AH:g}, min/max={MIN_IMPACT_OVER_MAX:g}."
+    )
 
 
 if __name__ == "__main__":

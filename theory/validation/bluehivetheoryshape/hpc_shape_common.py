@@ -15,7 +15,7 @@ REPO_ROOT = THIS_DIR.parents[2]
 if str(VALIDATION_DIR) not in sys.path:
     sys.path.insert(0, str(VALIDATION_DIR))
 
-from common import CM_PER_S_TO_M_PER_S, DEFAULT_CUTOFF_RADIUS_FACTOR, condition_label, make_drag, quiet_drag
+from common import CM_PER_S_TO_M_PER_S, DEFAULT_CUTOFF_RADIUS_FACTOR, condition_label, make_drag
 
 OUTDIR = THIS_DIR
 TASKS_CSV = OUTDIR / "bluehive_shape_tasks.csv"
@@ -25,7 +25,11 @@ SLURM_DIR = OUTDIR / "slurm"
 CONDITIONS = (0, 1, 2, 3)
 BMAX_OVER_AH = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0)
 BASE_BMAX_OVER_AH = 0.1
-BASE_RHORES = 10
+SHARED_BMAX_OVER_AH = 10.0
+SHARED_RHORES = 10000
+MIN_IMPACT_OVER_MAX = 1.0e-6
+IMPACT_GRID = "log"
+BASE_RHORES = SHARED_RHORES
 BASE_UDPHIRES = 100
 DEFAULT_VRES = 201
 DEFAULT_CURVE_POINTS = 30
@@ -41,47 +45,54 @@ def log_velocity_grid(minimum_cm_s: float, maximum_cm_s: float, points: int) -> 
     return [float(value) for value in np.geomspace(minimum_cm_s, maximum_cm_s, points)]
 
 
-def impact_resolution_for_bmax(
-    bmax_over_aH: float,
-    base_bmax_over_aH: float = BASE_BMAX_OVER_AH,
-    base_resolution: int = BASE_RHORES,
-) -> int:
-    """Scale equal-area impact bins so local physical bin width is comparable."""
-    if base_bmax_over_aH <= 0.0:
-        raise ValueError("base_bmax_over_aH must be positive")
-    if base_resolution < 1:
-        raise ValueError("base_resolution must be positive")
-    if not math.isfinite(bmax_over_aH) or bmax_over_aH <= 0.0:
-        raise ValueError("bmax/aH must be positive and finite")
-    scale = bmax_over_aH / base_bmax_over_aH
-    return max(2, int(math.ceil(base_resolution * scale**2)))
-
-
-def angle_resolution_for_bmax(
-    bmax_over_aH: float,
-    base_bmax_over_aH: float = BASE_BMAX_OVER_AH,
-    base_resolution: int = BASE_UDPHIRES,
-) -> int:
-    """Scale radial/scattering quadratures with the cutoff length."""
-    if base_bmax_over_aH <= 0.0:
-        raise ValueError("base_bmax_over_aH must be positive")
-    if base_resolution < 1:
-        raise ValueError("base_resolution must be positive")
-    if not math.isfinite(bmax_over_aH) or bmax_over_aH <= 0.0:
-        raise ValueError("bmax/aH must be positive and finite")
-    scale = bmax_over_aH / base_bmax_over_aH
-    return max(2, int(math.ceil(base_resolution * scale)))
-
-
-def task_resolution(bmax_over_aH: float, vres: int = DEFAULT_VRES) -> dict[str, int]:
-    impact_resolution = impact_resolution_for_bmax(bmax_over_aH)
-    angle_resolution = angle_resolution_for_bmax(bmax_over_aH)
+def task_resolution(vres: int = DEFAULT_VRES) -> dict[str, int]:
     return {
         "vres": int(vres),
-        "rhores": impact_resolution,
-        "ures": angle_resolution,
-        "dphires": angle_resolution,
+        "rhores": SHARED_RHORES,
+        "ures": BASE_UDPHIRES,
+        "dphires": BASE_UDPHIRES,
     }
+
+
+def speed_grid_and_weights(drag, drift_velocity_m_s: float) -> tuple[np.ndarray, np.ndarray, float]:
+    sigmav = math.sqrt(drag.kb * drag.T / drag.mu)
+    width = drag.vrel_sigma_width * sigmav
+    vmin = drift_velocity_m_s - width
+    vmax = drift_velocity_m_s + width
+    speed_min = 0.0 if vmin <= 0.0 <= vmax else min(abs(vmin), abs(vmax))
+    speed_max = max(abs(vmin), abs(vmax))
+    if drag.vres < 1 or speed_max <= speed_min:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64), math.nan
+
+    ds = (speed_max - speed_min) / drag.vres
+    speeds = speed_min + (np.arange(drag.vres, dtype=np.float64) + 0.5) * ds
+    norm = math.sqrt(drag.mu / (2.0 * math.pi * drag.kb * drag.T))
+    positive = np.zeros_like(speeds)
+    negative = np.zeros_like(speeds)
+    positive_mask = (vmin <= speeds) & (speeds <= vmax)
+    negative_mask = (vmin <= -speeds) & (-speeds <= vmax)
+    positive[positive_mask] = norm * np.exp(
+        -drag.mu * np.square(speeds[positive_mask] - drift_velocity_m_s) / (2.0 * drag.kb * drag.T)
+    )
+    negative[negative_mask] = norm * np.exp(
+        -drag.mu * np.square(-speeds[negative_mask] - drift_velocity_m_s) / (2.0 * drag.kb * drag.T)
+    )
+    return speeds, positive - negative, ds
+
+
+def launch_impact_grid(maximum_m: float, count: int, minimum_over_maximum: float) -> tuple[np.ndarray, np.ndarray]:
+    if maximum_m <= 0.0 or count < 1:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    if not 0.0 < minimum_over_maximum < 1.0:
+        raise ValueError("MIN_IMPACT_OVER_MAX must satisfy 0 < value < 1")
+    if count == 1:
+        edges = np.array([0.0, maximum_m], dtype=np.float64)
+    else:
+        positive_edges = np.geomspace(maximum_m * minimum_over_maximum, maximum_m, count, dtype=np.float64)
+        edges = np.concatenate(([0.0], positive_edges))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    widths = np.diff(edges)
+    return centers, widths
 
 
 def write_rows_csv(path: str | Path, rows: list[dict[str, object]]) -> None:
@@ -104,49 +115,20 @@ def task_output_path(task_id: int) -> Path:
     return RESULTS_DIR / f"task_{task_id:05d}.csv"
 
 
-def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> dict[str, object]:
+def row_for_cutoff(
+    task: dict[str, str | int | float],
+    drag,
+    force_n: float,
+    bmax_over_aH: float,
+    elapsed_s: float,
+    resolution: dict[str, int],
+) -> dict[str, object]:
     condition = int(task["condition"])
     velocity_cm_s = float(task["velocity_cm_s"])
-    vres = int(task["vres"])
-    resolution = task_resolution(bmax_over_aH, vres=vres)
     rhores = resolution["rhores"]
     ures = resolution["ures"]
     dphires = resolution["dphires"]
-
     rhomax_fraction = bmax_over_aH / DEFAULT_CUTOFF_RADIUS_FACTOR
-    if rhomax_fraction > 1.0:
-        raise ValueError(
-            f"bmax/aH={bmax_over_aH:g} exceeds launch radius "
-            f"{DEFAULT_CUTOFF_RADIUS_FACTOR:g} aH"
-        )
-
-    start = time.perf_counter()
-    print(
-        "[start] "
-        f"task_id={int(task['task_id'])} condition={condition} "
-        f"velocity_cm_s={velocity_cm_s:.6e} bmax/aH={bmax_over_aH:g} "
-        f"vres={vres} rhores={rhores} ures={ures} dphires={dphires}",
-        flush=True,
-    )
-
-    drag = make_drag(
-        condition,
-        vres=vres,
-        rhores=rhores,
-        ures=ures,
-        dphires=dphires,
-        rhomax_fraction=rhomax_fraction,
-        cutoff_radius_factor=DEFAULT_CUTOFF_RADIUS_FACTOR,
-    )
-    force_n = quiet_drag(drag, velocity_cm_s * CM_PER_S_TO_M_PER_S)
-    elapsed_s = time.perf_counter() - start
-    print(
-        "[done] "
-        f"task_id={int(task['task_id'])} condition={condition} "
-        f"velocity_cm_s={velocity_cm_s:.6e} bmax/aH={bmax_over_aH:g} "
-        f"drag_N={force_n:.6e} elapsed_min={elapsed_s/60.0:.2f}",
-        flush=True,
-    )
     acceleration_cm_s2 = abs(force_n / drag.ms) * 100.0
     hydrogen_interparticle_spacing_m = 1.0 / (DEFAULT_CUTOFF_RADIUS_FACTOR * drag.ustart)
     finite_radius_m = 1.0 / drag.ustart
@@ -160,11 +142,15 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
         "velocity_m_s": velocity_cm_s * CM_PER_S_TO_M_PER_S,
         "bmax_over_hydrogen_interparticle_spacing": bmax_over_aH,
         "rhomax_fraction_of_naive_outer_radius": rhomax_fraction,
-        "base_bmax_over_aH_for_resolution": BASE_BMAX_OVER_AH,
-        "base_rhores_at_bmax_0p1": BASE_RHORES,
+        "base_bmax_over_aH_for_resolution": SHARED_BMAX_OVER_AH,
+        "base_rhores_at_bmax_0p1": SHARED_RHORES,
         "base_ures_dphires_at_bmax_0p1": BASE_UDPHIRES,
-        "rhores_scaling": "base_rhores * (bmax/0.1)^2",
-        "ures_dphires_scaling": "base_ures_dphires * (bmax/0.1)",
+        "rhores_scaling": "shared log grid at bmax/aH=10, partial sums for smaller cutoffs",
+        "ures_dphires_scaling": "fixed for shared-grid task",
+        "impact_grid": IMPACT_GRID,
+        "min_impact_over_max": MIN_IMPACT_OVER_MAX,
+        "max_bmax_over_aH_for_shared_grid": SHARED_BMAX_OVER_AH,
+        "cumulative_bmax_grid": True,
         "cutoff_radius_factor": DEFAULT_CUTOFF_RADIUS_FACTOR,
         "hydrogen_interparticle_spacing_m": hydrogen_interparticle_spacing_m,
         "impact_parameter_cutoff_m": impact_parameter_cutoff_m,
@@ -173,10 +159,11 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
         "absolute_drag_N": abs(force_n),
         "model_acceleration_cm_s2": acceleration_cm_s2,
         "status": "ok" if math.isfinite(force_n) and force_n != 0.0 else "invalid_drag",
-        "vres": vres,
+        "vres": resolution["vres"],
         "rhores": rhores,
         "ures": ures,
         "dphires": dphires,
+        "elapsed_s": elapsed_s,
         "host": os.environ.get("HOSTNAME", ""),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
     }
@@ -184,24 +171,90 @@ def run_curve_point(task: dict[str, str | int | float], bmax_over_aH: float) -> 
 
 def run_condition_velocity_task(task: dict[str, str | int | float]) -> list[dict[str, object]]:
     task_start = time.perf_counter()
+    condition = int(task["condition"])
+    velocity_cm_s = float(task["velocity_cm_s"])
+    vres = int(task["vres"])
+    resolution = task_resolution(vres=vres)
+    max_bmax_over_aH = max(BMAX_OVER_AH)
+    if max_bmax_over_aH != SHARED_BMAX_OVER_AH:
+        raise ValueError("BMAX_OVER_AH must include SHARED_BMAX_OVER_AH as its largest cutoff")
+    rhomax_fraction = SHARED_BMAX_OVER_AH / DEFAULT_CUTOFF_RADIUS_FACTOR
+    if rhomax_fraction > 1.0:
+        raise ValueError(
+            f"bmax/aH={SHARED_BMAX_OVER_AH:g} exceeds launch radius "
+            f"{DEFAULT_CUTOFF_RADIUS_FACTOR:g} aH"
+        )
+
     print(
         "[task start] "
-        f"task_id={int(task['task_id'])} condition={int(task['condition'])} "
-        f"velocity_cm_s={float(task['velocity_cm_s']):.6e} bmax_count={len(BMAX_OVER_AH)}",
+        f"task_id={int(task['task_id'])} condition={condition} velocity_cm_s={velocity_cm_s:.6e} "
+        f"bmax/aH<= {SHARED_BMAX_OVER_AH:g} bmax_count={len(BMAX_OVER_AH)} "
+        f"vres={resolution['vres']} rhores={resolution['rhores']} "
+        f"ures={resolution['ures']} dphires={resolution['dphires']} impact_grid={IMPACT_GRID}",
         flush=True,
     )
+
+    drag = make_drag(
+        condition,
+        rhomax_fraction=rhomax_fraction,
+        cutoff_radius_factor=DEFAULT_CUTOFF_RADIUS_FACTOR,
+        **resolution,
+    )
+    velocity_m_s = velocity_cm_s * CM_PER_S_TO_M_PER_S
+    speeds, weights, ds = speed_grid_and_weights(drag, velocity_m_s)
+    hydrogen_interparticle_spacing_m = 1.0 / (DEFAULT_CUTOFF_RADIUS_FACTOR * drag.ustart)
+    cutoffs_m = {bmax: bmax * hydrogen_interparticle_spacing_m for bmax in BMAX_OVER_AH}
+    max_cutoff_m = SHARED_BMAX_OVER_AH * hydrogen_interparticle_spacing_m
+    launch_centers_m, launch_widths_m = launch_impact_grid(max_cutoff_m, resolution["rhores"], MIN_IMPACT_OVER_MAX)
+    integrals = {bmax: 0.0 for bmax in BMAX_OVER_AH}
+
+    active_speeds = 0
+    for speed_index, (speed, weight) in enumerate(zip(speeds, weights), 1):
+        if speed <= 0.0 or weight == 0.0:
+            continue
+        active_speeds += 1
+        if active_speeds == 1 or active_speeds % 25 == 0:
+            print(
+                "[task progress] "
+                f"task_id={int(task['task_id'])} active_speed={active_speeds} "
+                f"speed_index={speed_index}/{len(speeds)} speed_m_s={speed:.6e}",
+                flush=True,
+            )
+
+        energy = 0.5 * drag.mu * speed**2 + drag.E0Y
+        vinf = math.sqrt(energy / (0.5 * drag.mu))
+        rhoarr = launch_centers_m * speed / vinf
+        half_theta = drag.scattering_half_angle(rhoarr, energy)
+        if not np.all(np.isfinite(half_theta)):
+            raise FloatingPointError("non-finite scattering angle in cumulative impact integral")
+        bin_contribution = launch_centers_m * launch_widths_m * speed**2 * weight * (
+            2.0 * np.square(np.sin(half_theta))
+        )
+        cumulative = np.cumsum(bin_contribution)
+        for bmax, cutoff in cutoffs_m.items():
+            last = np.searchsorted(launch_centers_m, cutoff, side="right")
+            if last:
+                integrals[bmax] += float(cumulative[last - 1])
+
+    if not math.isfinite(ds):
+        raise FloatingPointError("invalid velocity-grid spacing")
+    prefactor = 2.0 * math.pi * drag.nh * drag.mu * ds
+    elapsed_s = time.perf_counter() - task_start
+
     rows = []
     for index, bmax_over_aH in enumerate(BMAX_OVER_AH, 1):
+        force_n = prefactor * integrals[bmax_over_aH]
         print(
             "[task progress] "
-            f"task_id={int(task['task_id'])} bmax_index={index}/{len(BMAX_OVER_AH)}",
+            f"task_id={int(task['task_id'])} bmax_index={index}/{len(BMAX_OVER_AH)} "
+            f"bmax/aH={bmax_over_aH:g} drag_N={force_n:.6e}",
             flush=True,
         )
-        rows.append(run_curve_point(task, bmax_over_aH))
-    elapsed_s = time.perf_counter() - task_start
+        rows.append(row_for_cutoff(task, drag, force_n, bmax_over_aH, elapsed_s, resolution))
+
     print(
         "[task done] "
-        f"task_id={int(task['task_id'])} elapsed_min={elapsed_s/60.0:.2f}",
+        f"task_id={int(task['task_id'])} active_speeds={active_speeds} elapsed_min={elapsed_s/60.0:.2f}",
         flush=True,
     )
     return rows
