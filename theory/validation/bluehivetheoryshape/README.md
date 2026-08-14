@@ -82,6 +82,11 @@ After all 120 jobs finish:
 python3 aggregate_results.py
 ```
 
+Individual tasks are launched through `run_task.sh`, which loads the BlueHive
+Python module, activates `/home/kshao4/env`, checks `numpy` and `scipy`, and
+then calls `run_task.py`. The generated SLURM files only set `TASK_ID` and call
+the bash wrapper.
+
 Outputs:
 
 - `bluehive_impact_parameter_shape_curves.csv`
