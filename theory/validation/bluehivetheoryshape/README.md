@@ -68,7 +68,9 @@ bash run_task.sh
 With no arguments, `run_task.sh` regenerates `bluehive_shape_tasks.csv`, regenerates
 the SLURM scripts, and submits all 120 jobs with `sbatch`.
 
-The older submit entrypoint is still available and delegates to `run_task.sh`:
+`submit_120.sh` is only a backwards-compatible alias. It delegates directly to
+`run_task.sh`, so the preferred command and the legacy command submit the same
+jobs through the same code path:
 
 ```bash
 bash submit_120.sh
@@ -82,9 +84,9 @@ python3 aggregate_results.py
 
 Individual tasks are also launched through `run_task.sh`. When called with
 `--task-id` or with `TASK_ID` set by SLURM, it loads the BlueHive Python module,
-activates `/home/kshao4/env`, checks `numpy` and `scipy`, and then calls
-`run_task.py`. The generated SLURM files only set `TASK_ID` and call the bash
-wrapper.
+loads SLURM, activates `/home/kshao4/env`, checks `numpy` and `scipy`, and then
+calls `run_task.py`. The generated SLURM files only set `TASK_ID` and call the
+bash wrapper.
 
 Outputs:
 
