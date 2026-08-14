@@ -62,15 +62,13 @@ required for `aggregate_results.py` to make the final plots.
 From this directory:
 
 ```bash
-module load python3/3.11.10
-source /home/kshao4/env/bin/activate
-python3 generate_tasks.py
-python3 generate_slurm_files.py
-mkdir -p logs task_results
-for job in slurm/shape_*.slurm; do sbatch "$job"; done
+bash run_task.sh
 ```
 
-Or use:
+With no arguments, `run_task.sh` regenerates `bluehive_shape_tasks.csv`, regenerates
+the SLURM scripts, and submits all 120 jobs with `sbatch`.
+
+The older submit entrypoint is still available and delegates to `run_task.sh`:
 
 ```bash
 bash submit_120.sh
@@ -82,10 +80,11 @@ After all 120 jobs finish:
 python3 aggregate_results.py
 ```
 
-Individual tasks are launched through `run_task.sh`, which loads the BlueHive
-Python module, activates `/home/kshao4/env`, checks `numpy` and `scipy`, and
-then calls `run_task.py`. The generated SLURM files only set `TASK_ID` and call
-the bash wrapper.
+Individual tasks are also launched through `run_task.sh`. When called with
+`--task-id` or with `TASK_ID` set by SLURM, it loads the BlueHive Python module,
+activates `/home/kshao4/env`, checks `numpy` and `scipy`, and then calls
+`run_task.py`. The generated SLURM files only set `TASK_ID` and call the bash
+wrapper.
 
 Outputs:
 
