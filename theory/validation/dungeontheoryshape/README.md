@@ -71,3 +71,18 @@ This writes:
 
 - `extreme_bmax_resolution_convergence.csv`
 - `extreme_bmax_resolution_convergence.png`
+
+To check convergence of the entire velocity shape, rather than a single
+velocity, for the same two extreme bmax values:
+
+```bash
+python3 run_shape_resolution_convergence_extreme_bmax.py --workers 20 --gpus 2
+```
+
+This writes:
+
+- `shape_resolution_convergence_extreme_bmax.csv`
+- `condition_0_shape_resolution_convergence_extreme_bmax.png`
+- `condition_1_shape_resolution_convergence_extreme_bmax.png`
+- `condition_2_shape_resolution_convergence_extreme_bmax.png`
+- `condition_3_shape_resolution_convergence_extreme_bmax.png`
