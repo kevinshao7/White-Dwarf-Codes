@@ -19,25 +19,43 @@ from hpc_shape_common import (
     SHARED_RHORES,
     condition_label,
     log_velocity_grid,
+    require_usable_gpus,
     run_condition_velocity_task,
     write_rows_csv,
 )
 
 
-DEFAULT_FACTORS = (0.1, 0.3, 1.0, 3.0, 10.0)
-DEFAULT_CONDITIONS = (0, 1, 2, 3)
+DEFAULT_FACTORS = (0.1, 0.3, 1.0, 3.0)
+DEFAULT_CONDITIONS = (0,)
 EXTREME_BMAX_OVER_AH = (0.1, 10.0)
+DEFAULT_RESOLUTION_AXES = ("vres", "rhores", "angle")
+DEFAULT_CONVERGENCE_CURVE_POINTS = 10
 
 
-def scaled_resolution(factor: float) -> dict[str, int]:
+def scaled_resolution(factor: float, axis: str) -> dict[str, int]:
     if factor <= 0.0:
         raise ValueError("resolution scale factors must be positive")
-    return {
-        "vres": max(3, int(round(DEFAULT_VRES * factor))),
-        "rhores": max(10, int(round(SHARED_RHORES * factor))),
-        "ures": max(8, int(round(BASE_UDPHIRES * factor))),
-        "dphires": max(8, int(round(BASE_UDPHIRES * factor))),
+    resolution = {
+        "vres": DEFAULT_VRES,
+        "rhores": SHARED_RHORES,
+        "ures": BASE_UDPHIRES,
+        "dphires": BASE_UDPHIRES,
     }
+    if axis == "all":
+        resolution["vres"] = max(3, int(round(DEFAULT_VRES * factor)))
+        resolution["rhores"] = max(10, int(round(SHARED_RHORES * factor)))
+        resolution["ures"] = max(8, int(round(BASE_UDPHIRES * factor)))
+        resolution["dphires"] = max(8, int(round(BASE_UDPHIRES * factor)))
+    elif axis == "vres":
+        resolution["vres"] = max(3, int(round(DEFAULT_VRES * factor)))
+    elif axis == "rhores":
+        resolution["rhores"] = max(10, int(round(SHARED_RHORES * factor)))
+    elif axis == "angle":
+        resolution["ures"] = max(8, int(round(BASE_UDPHIRES * factor)))
+        resolution["dphires"] = max(8, int(round(BASE_UDPHIRES * factor)))
+    else:
+        raise ValueError(f"unknown resolution axis {axis!r}")
+    return resolution
 
 
 def finite_float(value: object) -> float:
@@ -58,9 +76,10 @@ def run_curve_point(
     condition: int,
     velocity_cm_s: float,
     factor: float,
+    resolution_axis: str,
     gpu_count: int,
 ) -> list[dict[str, object]]:
-    resolution = scaled_resolution(factor)
+    resolution = scaled_resolution(factor, resolution_axis)
     gpu_id = (task_id - 1) % gpu_count if gpu_count > 0 else -1
     task = {
         "task_id": task_id,
@@ -68,11 +87,12 @@ def run_curve_point(
         "condition_label": condition_label(condition),
         "velocity_cm_s": velocity_cm_s,
         "gpu_id": gpu_id,
+        "require_gpu": gpu_count > 0,
         **resolution,
     }
     print(
         "[shape convergence start] "
-        f"task_id={task_id} condition={condition} factor={factor:g} "
+        f"task_id={task_id} condition={condition} axis={resolution_axis} factor={factor:g} "
         f"velocity_cm_s={velocity_cm_s:.6e} vres={resolution['vres']} "
         f"rhores={resolution['rhores']} ures={resolution['ures']} "
         f"dphires={resolution['dphires']} gpu_id={gpu_id if gpu_id >= 0 else 'cpu'}",
@@ -83,19 +103,30 @@ def run_curve_point(
     for row in rows:
         if is_extreme_bmax(row["bmax_over_hydrogen_interparticle_spacing"]):
             row["resolution_factor"] = factor
+            row["resolution_axis"] = resolution_axis
             row["reference_condition_label"] = condition_label(condition)
             filtered.append(row)
     return filtered
 
 
 def add_curve_reference_columns(rows: list[dict[str, object]]) -> None:
-    reference: dict[tuple[int, float, float], float] = {}
-    highest_factor = max(finite_float(row["resolution_factor"]) for row in rows)
+    reference: dict[tuple[int, str, float, float], float] = {}
+    highest_factor_by_axis = {
+        str(axis): max(
+            finite_float(row["resolution_factor"])
+            for row in rows
+            if str(row.get("resolution_axis", "all")) == str(axis)
+        )
+        for axis in {str(row.get("resolution_axis", "all")) for row in rows}
+    }
     for row in rows:
+        axis = str(row.get("resolution_axis", "all"))
+        highest_factor = highest_factor_by_axis[axis]
         if finite_float(row["resolution_factor"]) != highest_factor:
             continue
         key = (
             int(row["condition"]),
+            axis,
             finite_float(row["bmax_over_hydrogen_interparticle_spacing"]),
             finite_float(row["velocity_cm_s"]),
         )
@@ -104,18 +135,20 @@ def add_curve_reference_columns(rows: list[dict[str, object]]) -> None:
     for row in rows:
         key = (
             int(row["condition"]),
+            str(row.get("resolution_axis", "all")),
             finite_float(row["bmax_over_hydrogen_interparticle_spacing"]),
             finite_float(row["velocity_cm_s"]),
         )
         ref = reference.get(key, math.nan)
         value = finite_float(row["absolute_drag_N"])
-        row["reference_resolution_factor"] = highest_factor
+        row["reference_resolution_factor"] = highest_factor_by_axis[str(row.get("resolution_axis", "all"))]
         row["absolute_drag_N_at_reference_resolution"] = ref
         row["relative_error_vs_reference_resolution"] = abs(value / ref - 1.0) if math.isfinite(ref) and ref != 0.0 else math.nan
 
 
-def plot_condition(rows: list[dict[str, object]], condition: int, output: Path) -> None:
+def plot_condition_axis(rows: list[dict[str, object]], condition: int, resolution_axis: str, output: Path) -> None:
     condition_rows = [row for row in rows if int(row["condition"]) == condition]
+    condition_rows = [row for row in condition_rows if str(row.get("resolution_axis", "all")) == resolution_axis]
     if not condition_rows:
         return
 
@@ -179,7 +212,7 @@ def plot_condition(rows: list[dict[str, object]], condition: int, output: Path) 
         axis.grid(True, which="both", alpha=0.25)
         axis.legend(fontsize=7)
 
-    fig.suptitle(f"Condition {condition}: {condition_label(condition)}, shape convergence")
+    fig.suptitle(f"Condition {condition}: {condition_label(condition)}, {resolution_axis} convergence")
     fig.tight_layout()
     fig.savefig(output, dpi=220)
     plt.close(fig)
@@ -191,9 +224,16 @@ def main() -> None:
     )
     parser.add_argument("--conditions", nargs="+", type=int, default=list(DEFAULT_CONDITIONS))
     parser.add_argument("--factors", default=",".join(f"{factor:g}" for factor in DEFAULT_FACTORS))
-    parser.add_argument("--curve-points", type=int, default=DEFAULT_CURVE_POINTS)
+    parser.add_argument("--curve-points", type=int, default=DEFAULT_CONVERGENCE_CURVE_POINTS)
     parser.add_argument("--min-velocity-cm-s", type=float, default=DEFAULT_MIN_VELOCITY_CM_S)
     parser.add_argument("--max-velocity-cm-s", type=float, default=DEFAULT_MAX_VELOCITY_CM_S)
+    parser.add_argument(
+        "--scale-mode",
+        choices=("separate", "all"),
+        default="separate",
+        help="separate scales vres/rhores/angle one at a time; all scales every numerical dimension together.",
+    )
+    parser.add_argument("--axes", nargs="+", default=list(DEFAULT_RESOLUTION_AXES), choices=("vres", "rhores", "angle"))
     parser.add_argument("--workers", type=int, default=int(os.environ.get("DUNGEON_CPU_CORES", "20")))
     parser.add_argument("--gpus", type=int, default=int(os.environ.get("DUNGEON_GPUS", "2")))
     parser.add_argument(
@@ -205,19 +245,22 @@ def main() -> None:
 
     factors = [float(value) for value in args.factors.split(",") if value.strip()]
     velocities = log_velocity_grid(args.min_velocity_cm_s, args.max_velocity_cm_s, args.curve_points)
+    resolution_axes = ["all"] if args.scale_mode == "all" else list(args.axes)
     jobs = []
     task_id = 1
     for condition in args.conditions:
-        for factor in factors:
-            for velocity_cm_s in velocities:
-                jobs.append((task_id, condition, velocity_cm_s, factor))
-                task_id += 1
+        for resolution_axis in resolution_axes:
+            for factor in factors:
+                for velocity_cm_s in velocities:
+                    jobs.append((task_id, condition, velocity_cm_s, factor, resolution_axis))
+                    task_id += 1
 
     worker_count = max(1, min(args.workers, len(jobs)))
     gpu_count = max(0, args.gpus)
+    require_usable_gpus(gpu_count)
     print(
         "[shape convergence run] "
-        f"conditions={args.conditions} factors={factors} velocities={len(velocities)} "
+        f"conditions={args.conditions} axes={resolution_axes} factors={factors} velocities={len(velocities)} "
         f"workers={worker_count} gpus={gpu_count}",
         flush=True,
     )
@@ -225,20 +268,21 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as pool:
         futures = {
-            pool.submit(run_curve_point, task_id, condition, velocity_cm_s, factor, gpu_count): (
+            pool.submit(run_curve_point, task_id, condition, velocity_cm_s, factor, resolution_axis, gpu_count): (
                 condition,
                 velocity_cm_s,
                 factor,
+                resolution_axis,
             )
-            for task_id, condition, velocity_cm_s, factor in jobs
+            for task_id, condition, velocity_cm_s, factor, resolution_axis in jobs
         }
         for future in concurrent.futures.as_completed(futures):
-            condition, velocity_cm_s, factor = futures[future]
+            condition, velocity_cm_s, factor, resolution_axis = futures[future]
             curve_rows = future.result()
             rows.extend(curve_rows)
             print(
                 "[shape convergence progress] "
-                f"finished condition={condition} factor={factor:g} "
+                f"finished condition={condition} axis={resolution_axis} factor={factor:g} "
                 f"velocity_cm_s={velocity_cm_s:.6e} rows={len(curve_rows)}",
                 flush=True,
             )
@@ -246,6 +290,7 @@ def main() -> None:
     rows.sort(
         key=lambda row: (
             int(row["condition"]),
+            str(row.get("resolution_axis", "all")),
             float(row["bmax_over_hydrogen_interparticle_spacing"]),
             float(row["resolution_factor"]),
             float(row["velocity_cm_s"]),
@@ -256,9 +301,10 @@ def main() -> None:
     print(f"Wrote {args.output_csv}")
 
     for condition in args.conditions:
-        output_png = OUTDIR / f"condition_{condition}_shape_resolution_convergence_extreme_bmax.png"
-        plot_condition(rows, condition, output_png)
-        print(f"Wrote {output_png}")
+        for resolution_axis in resolution_axes:
+            output_png = OUTDIR / f"condition_{condition}_{resolution_axis}_shape_resolution_convergence_extreme_bmax.png"
+            plot_condition_axis(rows, condition, resolution_axis, output_png)
+            print(f"Wrote {output_png}")
 
 
 if __name__ == "__main__":

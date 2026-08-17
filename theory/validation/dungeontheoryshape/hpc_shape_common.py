@@ -39,8 +39,47 @@ DEFAULT_MAX_VELOCITY_CM_S = 1.0e8
 def optional_cupy():
     try:
         import cupy as cp
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"cupy import failed: {exc}"
+    try:
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+    except Exception as exc:
+        return None, f"cupy imported but CUDA device query failed: {exc}"
+    if device_count < 1:
+        return None, "cupy imported but CUDA reports zero devices"
+    return cp, f"cupy ok, cuda_devices={device_count}"
+
+
+def gpu_reduction_status(gpu_id: int) -> tuple[object | None, bool, str]:
+    cp, message = optional_cupy()
+    if cp is None:
+        return None, False, message
+    if gpu_id < 0:
+        return cp, False, "gpu_id < 0, GPU reduction disabled for this task"
+    try:
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+    except Exception as exc:
+        return cp, False, f"CUDA device query failed: {exc}"
+    if gpu_id >= device_count:
+        return cp, False, f"requested gpu_id={gpu_id}, but CUDA devices={device_count}"
+    return cp, True, f"using gpu_id={gpu_id} for reduction"
+
+
+def require_usable_gpus(gpu_count: int) -> None:
+    if gpu_count <= 0:
+        return
+    cp, message = optional_cupy()
+    if cp is None:
+        raise SystemExit(
+            f"Requested --gpus {gpu_count}, but GPU reduction is unavailable: {message}. "
+            "Install a CUDA-compatible CuPy build or rerun with --gpus 0."
+        )
+    device_count = int(cp.cuda.runtime.getDeviceCount())
+    if device_count < gpu_count:
+        raise SystemExit(
+            f"Requested --gpus {gpu_count}, but CUDA reports only {device_count} devices. "
+            f"Use --gpus {device_count} or less."
+        )
     return cp
 
 
@@ -199,8 +238,10 @@ def run_condition_velocity_task(task: dict[str, str | int | float]) -> list[dict
     ures = int(task.get("ures", BASE_UDPHIRES))
     dphires = int(task.get("dphires", BASE_UDPHIRES))
     gpu_id = int(task.get("gpu_id", os.environ.get("DUNGEON_GPU_ID", "-1")))
-    cp = optional_cupy()
-    use_gpu_reduction = can_use_gpu_reduction(cp, gpu_id)
+    require_gpu = bool(task.get("require_gpu", False))
+    cp, use_gpu_reduction, gpu_message = gpu_reduction_status(gpu_id)
+    if require_gpu and not use_gpu_reduction:
+        raise RuntimeError(f"GPU was required for task_id={task['task_id']}, but it is unavailable: {gpu_message}")
     resolution = task_resolution(vres=vres, rhores=rhores, ures=ures, dphires=dphires)
     max_bmax_over_aH = max(BMAX_OVER_AH)
     if max_bmax_over_aH != SHARED_BMAX_OVER_AH:
@@ -218,7 +259,8 @@ def run_condition_velocity_task(task: dict[str, str | int | float]) -> list[dict
         f"bmax/aH<= {SHARED_BMAX_OVER_AH:g} bmax_count={len(BMAX_OVER_AH)} "
         f"vres={resolution['vres']} rhores={resolution['rhores']} "
         f"ures={resolution['ures']} dphires={resolution['dphires']} impact_grid={IMPACT_GRID} "
-        f"gpu_reduction={use_gpu_reduction} gpu_id={gpu_id if use_gpu_reduction else 'cpu'}",
+        f"gpu_reduction={use_gpu_reduction} gpu_id={gpu_id if use_gpu_reduction else 'cpu'} "
+        f"gpu_status='{gpu_message}'",
         flush=True,
     )
 

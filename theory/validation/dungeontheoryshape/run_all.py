@@ -15,6 +15,7 @@ from hpc_shape_common import (
     TASKS_CSV,
     add_shape_columns,
     read_rows_csv,
+    require_usable_gpus,
     run_condition_velocity_task,
     task_output_path,
     write_rows_csv,
@@ -25,6 +26,7 @@ def run_one(task: dict[str, str], gpu_count: int) -> list[dict[str, object]]:
     task_id = int(task["task_id"])
     if gpu_count > 0:
         task["gpu_id"] = str((task_id - 1) % gpu_count)
+        task["require_gpu"] = True
     rows = run_condition_velocity_task(task)
     write_rows_csv(task_output_path(task_id), rows)
     return rows
@@ -70,6 +72,7 @@ def main() -> None:
     all_rows: list[dict[str, object]] = []
     worker_count = max(1, min(args.workers, len(tasks)))
     gpu_count = max(0, args.gpus)
+    require_usable_gpus(gpu_count)
 
     print(
         f"[run start] tasks={len(tasks)} workers={worker_count} gpus={gpu_count} "
