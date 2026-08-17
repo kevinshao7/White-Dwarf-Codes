@@ -132,9 +132,9 @@ def plot_trends(rows: list[dict[str, object]], output_png: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--summary-csv", type=Path, default=OUTDIR / "impact_parameter_fit_summary.csv")
-    parser.add_argument("--output-png", type=Path, default=OUTDIR / "impact_parameter_fit_trends.png")
-    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "impact_parameter_fit_trends.csv")
+    parser.add_argument("--summary-csv", type=Path, default=OUTDIR / "bmax_fit_summary.csv")
+    parser.add_argument("--output-png", type=Path, default=OUTDIR / "bmax_fit_trends.png")
+    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "bmax_fit_trends.csv")
     args = parser.parse_args()
 
     rows = load_summary(args.summary_csv)

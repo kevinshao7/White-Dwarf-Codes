@@ -1,5 +1,5 @@
 # Run from repository root:
-# python .\theory\validation\impactparameterfit\impactparametershape.py --workers 8
+# python .\theory\validation\impactparameterfit\sweep_bmax_shape_finite_launch.py --workers 8
 from __future__ import annotations
 
 import argparse
@@ -19,9 +19,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(OUTDIR / ".matplotlib"))
 CONDITIONS = (1, 3)
 CM_PER_S_TO_M_PER_S = 1.0e-2
 DEFAULT_CUTOFF_RADIUS_FACTOR = 50.0
-DEFAULT_BMAX_OVER_SPACING = (0.5, 1.0, 2.0, 4.0)
+DEFAULT_BMAX_OVER_SPACING = (0.1, 1.0, 10.0)
 
-from resolution_scaling import scaled_resolution_for_bmax
+from bmax_resolution_scaling import scaled_resolution_for_bmax
 
 
 def positive_float_list(text: str) -> tuple[float, ...]:
@@ -65,7 +65,7 @@ def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 def run_curve_point(task: tuple[int, float, float, dict[str, int]]) -> dict[str, object]:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from common import condition_label, make_drag, quiet_drag
+    from commonfinite import condition_label, make_drag, quiet_drag
 
     condition, velocity_cm_s, bmax_over_spacing, resolution = task
     rhomax_fraction = bmax_over_spacing / DEFAULT_CUTOFF_RADIUS_FACTOR
@@ -84,9 +84,8 @@ def run_curve_point(task: tuple[int, float, float, dict[str, int]]) -> dict[str,
     )
     force_n = quiet_drag(drag, velocity_cm_s * CM_PER_S_TO_M_PER_S)
     acceleration_cm_s2 = abs(force_n / drag.ms) * 100.0
+    impact_parameter_cutoff_m = drag.launch_pmax()
     hydrogen_interparticle_spacing_m = 1.0 / (DEFAULT_CUTOFF_RADIUS_FACTOR * drag.ustart)
-    finite_radius_m = 1.0 / drag.ustart
-    impact_parameter_cutoff_m = bmax_over_spacing * hydrogen_interparticle_spacing_m
 
     return {
         "condition": condition,
@@ -94,18 +93,17 @@ def run_curve_point(task: tuple[int, float, float, dict[str, int]]) -> dict[str,
         "velocity_cm_s": velocity_cm_s,
         "velocity_m_s": velocity_cm_s * CM_PER_S_TO_M_PER_S,
         "bmax_over_hydrogen_interparticle_spacing": bmax_over_spacing,
-        "rhomax_fraction_of_naive_outer_radius": rhomax_fraction,
+        "rhomax_fraction_of_finite_launch_radius": rhomax_fraction,
         "cutoff_radius_factor": DEFAULT_CUTOFF_RADIUS_FACTOR,
         "hydrogen_interparticle_spacing_m": hydrogen_interparticle_spacing_m,
         "impact_parameter_cutoff_m": impact_parameter_cutoff_m,
-        "finite_radius_m": finite_radius_m,
-        "angular_momentum_geometry": "naive finite radius with DragFourth: L=mu*b*v_inf",
+        "finite_launch_radius_m": drag.launch_radius(),
+        "angular_momentum_geometry": "L=mu*r_start*v_start*sin(theta), theta=asin(p/r_start)",
         "drag_N": force_n,
         "absolute_drag_N": abs(force_n),
         "model_acceleration_cm_s2": acceleration_cm_s2,
         "status": "ok" if math.isfinite(force_n) and force_n != 0.0 else "invalid_drag",
         "base_rhores_at_bmax_over_aH_1": resolution["rhores"],
-        "base_dphires_at_bmax_over_aH_1": resolution["dphires"],
         **scaled_resolution,
     }
 
@@ -152,7 +150,7 @@ def plot_condition(rows: list[dict[str, object]], condition: int, bmax_values: t
     import numpy as np
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from common import condition_label
+    from commonfinite import condition_label
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.2), sharex=True)
     colors = plt.cm.viridis(np.linspace(0.15, 0.85, len(bmax_values)))
@@ -209,7 +207,10 @@ def plot_condition(rows: list[dict[str, object]], condition: int, bmax_values: t
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Plot drag-curve shape changes for fixed choices of impact-parameter cutoff bmax/aH."
+        description=(
+            "Plot drag-curve shape changes for fixed impact-parameter cutoffs "
+            "using the self-consistent finite-start angular momentum formulation."
+        )
     )
     parser.add_argument("--conditions", nargs="+", type=int, choices=CONDITIONS, default=list(CONDITIONS))
     parser.add_argument("--workers", type=int, default=8)
@@ -221,11 +222,11 @@ def main() -> None:
     parser.add_argument("--rhores", type=int, default=180)
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
-    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "impact_parameter_shape_curves.csv")
+    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "bmax_shape_sweep_finite_launch_curves.csv")
     parser.add_argument(
         "--output-png-template",
         type=str,
-        default=str(OUTDIR / "condition_{condition}_impact_parameter_shape.png"),
+        default=str(OUTDIR / "bmax_shape_sweep_finite_launch_condition_{condition}.png"),
         help="Output PNG path template. Use {condition} for the condition number.",
     )
     args = parser.parse_args()
@@ -234,8 +235,6 @@ def main() -> None:
         parser.error("--workers must be at least 1")
     if args.rhores < 1:
         parser.error("--rhores is the bin count at bmax/aH=1 and must be positive")
-    if args.dphires < 1:
-        parser.error("--dphires is the scattering-angle bin count at bmax/aH=1 and must be positive")
     if max(args.bmax_over_spacing) > DEFAULT_CUTOFF_RADIUS_FACTOR:
         parser.error(
             f"--bmax-over-spacing values must not exceed the finite launch radius "

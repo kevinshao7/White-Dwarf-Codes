@@ -1,4 +1,4 @@
-# Run from repository root: python .\theory\validation\impactparameterfit\run_impact_parameter_fit.py --workers 8
+# Run from repository root: python .\theory\validation\impactparameterfit\fit_bmax_to_lammps.py --workers 8
 from __future__ import annotations
 
 import argparse
@@ -28,7 +28,7 @@ from common import (
     quiet_drag,
     write_csv,
 )
-from resolution_scaling import scaled_resolution_for_bmax
+from bmax_resolution_scaling import scaled_resolution_for_bmax
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALL_CONDITIONS = (0, 1, 2, 3)
@@ -743,7 +743,7 @@ def plot_results(
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUTDIR / "impact_parameter_fit.png", dpi=200)
+    fig.savefig(OUTDIR / "bmax_fit_lammps_overlay.png", dpi=200)
 
 
 def adaptive_curve_for_condition(points: list[DataPoint], n_curve: int) -> np.ndarray:
@@ -890,7 +890,7 @@ def main() -> None:
         print(f"[condition omitted] condition={row['condition']}: {row['reason']}", file=sys.stderr)
     requested_conditions.intersection_update(available_conditions)
     if not requested_conditions:
-        write_csv(OUTDIR / "impact_parameter_fit_omitted_conditions.csv", omitted_condition_rows)
+        write_csv(OUTDIR / "bmax_fit_omitted_conditions.csv", omitted_condition_rows)
         raise SystemExit("No requested condition has usable retained data; no impact-parameter results were generated.")
 
     fit_points, fit_point_selection_by_condition = select_fit_points(all_points, args.fit_points_per_condition)
@@ -1011,10 +1011,10 @@ def main() -> None:
                     )
         curve_rows = list(pool.map(run_curve_case, curve_tasks))
 
-    write_csv(OUTDIR / "impact_parameter_fit_predictions.csv", prediction_rows)
-    write_csv(OUTDIR / "impact_parameter_fit_curve.csv", curve_rows)
-    write_csv(OUTDIR / "impact_parameter_fit_summary.csv", summary_rows)
-    write_csv(OUTDIR / "impact_parameter_fit_omitted_conditions.csv", omitted_condition_rows)
+    write_csv(OUTDIR / "bmax_fit_lammps_predictions.csv", prediction_rows)
+    write_csv(OUTDIR / "bmax_fit_model_curves.csv", curve_rows)
+    write_csv(OUTDIR / "bmax_fit_summary.csv", summary_rows)
+    write_csv(OUTDIR / "bmax_fit_omitted_conditions.csv", omitted_condition_rows)
     plot_results(all_points, fit_points, curve_rows, summary_rows, args.fit_parameter)
 
     for row in summary_rows:

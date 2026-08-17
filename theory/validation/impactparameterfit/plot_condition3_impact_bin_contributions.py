@@ -1,5 +1,5 @@
 # Run from repository root:
-# python .\theory\validation\impactparameterfit\plot_impact_bin_contributions.py
+# python .\theory\validation\impactparameterfit\plot_condition3_impact_bin_contributions.py
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from commonfinite import CM_PER_S_TO_M_PER_S, DEFAULT_CUTOFF_RADIUS_FACTOR, condition_label, make_drag
-from resolution_scaling import scaled_resolution_for_bmax
+from bmax_resolution_scaling import scaled_resolution_for_bmax
 
 CONDITIONS = (0, 1, 2, 3)
 DEFAULT_BMAX_OVER_AH = (0.1, 1.0, 10.0)
@@ -255,7 +255,7 @@ def main() -> None:
     parser.add_argument("--ures", type=int, default=120)
     parser.add_argument("--dphires", type=int, default=120)
     parser.add_argument("--output-csv", type=Path, default=OUTDIR / "impact_bin_contributions.csv")
-    parser.add_argument("--output-png", type=Path, default=OUTDIR / "condition_3_impact_bin_contributions.png")
+    parser.add_argument("--output-png", type=Path, default=OUTDIR / "condition3_impact_bin_contributions.png")
     args = parser.parse_args()
 
     if max(args.bmax_over_aH) > DEFAULT_CUTOFF_RADIUS_FACTOR:

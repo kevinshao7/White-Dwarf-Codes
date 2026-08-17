@@ -1,5 +1,5 @@
 # Run from repository root:
-# python .\theory\validation\impactparameterfit\plot_closest_approach_vs_bmax.py
+# python .\theory\validation\impactparameterfit\plot_closest_approach_by_bmax.py
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CM_PER_S_TO_M_PER_S, DEFAULT_CUTOFF_RADIUS_FACTOR, condition_label, make_drag
-from resolution_scaling import scaled_resolution_for_bmax
+from bmax_resolution_scaling import scaled_resolution_for_bmax
 
 CONDITIONS = (0, 1, 2, 3)
 DEFAULT_VELOCITIES_CM_S = (1.0e5, 1.0e6, 1.0e7)
@@ -234,8 +234,8 @@ def main() -> None:
     parser.add_argument("--rhores", type=int, default=180, help="Impact-parameter bin count at bmax/aH=1.")
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
-    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "closest_approach_vs_bmax.csv")
-    parser.add_argument("--output-png", type=Path, default=OUTDIR / "closest_approach_vs_bmax.png")
+    parser.add_argument("--output-csv", type=Path, default=OUTDIR / "closest_approach_by_bmax.csv")
+    parser.add_argument("--output-png", type=Path, default=OUTDIR / "closest_approach_by_bmax.png")
     args = parser.parse_args()
 
     if args.min_bmax_over_aH <= 0.0:

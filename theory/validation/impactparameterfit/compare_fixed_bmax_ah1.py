@@ -1,4 +1,4 @@
-# Run from repository root: python .\theory\validation\impactparameterfit\run_fixed_bmax_ah_comparison.py --workers 8
+# Run from repository root: python .\theory\validation\impactparameterfit\compare_fixed_bmax_ah1.py --workers 8
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from run_impact_parameter_fit import (
+from fit_bmax_to_lammps import (
     ALL_CONDITIONS,
     COUPLING_PARAMETER,
     REPO_ROOT,
@@ -251,22 +251,22 @@ def main() -> None:
         summarize(condition, [row for row in prediction_rows if int(row["condition"]) == condition])
         for condition in conditions
     ]
-    write_csv(OUTDIR / "fixed_bmax_ah_1_predictions.csv", prediction_rows)
-    write_csv(OUTDIR / "fixed_bmax_ah_1_curve.csv", curve_rows)
-    write_csv(OUTDIR / "fixed_bmax_ah_1_summary.csv", summaries)
+    write_csv(OUTDIR / "fixed_bmax_ah1_lammps_predictions.csv", prediction_rows)
+    write_csv(OUTDIR / "fixed_bmax_ah1_model_curves.csv", curve_rows)
+    write_csv(OUTDIR / "fixed_bmax_ah1_summary.csv", summaries)
     plot_comparison(
         all_points,
         selected_points,
         curve_rows,
         summaries,
         conditions,
-        OUTDIR / "fixed_bmax_ah_1_comparison.png",
+        OUTDIR / "fixed_bmax_ah1_comparison.png",
     )
     plot_shape_diagnostics(
         prediction_rows,
         curve_rows,
         conditions,
-        OUTDIR / "fixed_bmax_ah_1_shape_diagnostics.png",
+        OUTDIR / "fixed_bmax_ah1_shape_diagnostics.png",
     )
 
     for row in summaries:
