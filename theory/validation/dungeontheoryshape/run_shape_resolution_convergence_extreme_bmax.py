@@ -28,7 +28,7 @@ from hpc_shape_common import (
 DEFAULT_FACTORS = (0.1, 0.3, 1.0, 3.0)
 DEFAULT_CONDITIONS = (0,)
 EXTREME_BMAX_OVER_AH = (0.1, 10.0)
-DEFAULT_RESOLUTION_AXES = ("vres", "rhores", "angle")
+DEFAULT_RESOLUTION_AXES = ("vres", "impact_angle")
 DEFAULT_CONVERGENCE_CURVE_POINTS = 10
 
 
@@ -48,9 +48,8 @@ def scaled_resolution(factor: float, axis: str) -> dict[str, int]:
         resolution["dphires"] = max(8, int(round(BASE_UDPHIRES * factor)))
     elif axis == "vres":
         resolution["vres"] = max(3, int(round(DEFAULT_VRES * factor)))
-    elif axis == "rhores":
+    elif axis in {"impact_angle", "rhores", "angle"}:
         resolution["rhores"] = max(10, int(round(SHARED_RHORES * factor)))
-    elif axis == "angle":
         resolution["ures"] = max(8, int(round(BASE_UDPHIRES * factor)))
         resolution["dphires"] = max(8, int(round(BASE_UDPHIRES * factor)))
     else:
@@ -200,7 +199,7 @@ def plot_condition_axis(rows: list[dict[str, object]], condition: int, resolutio
             )
 
         axes[0, column].set_title(rf"$b_{{max}}/a_H={bmax:g}$ absolute drag")
-        axes[1, column].set_title(rf"$b_{{max}}/a_H={bmax:g}$ error vs 10x")
+        axes[1, column].set_title(rf"$b_{{max}}/a_H={bmax:g}$ error vs highest")
         axes[0, column].set_ylabel("|drag| [N]")
         axes[1, column].set_ylabel("relative error")
         axes[0, column].set_yscale("log")
@@ -218,6 +217,15 @@ def plot_condition_axis(rows: list[dict[str, object]], condition: int, resolutio
     plt.close(fig)
 
 
+def terminate_pool_workers(pool: concurrent.futures.ProcessPoolExecutor) -> None:
+    processes = getattr(pool, "_processes", None)
+    if not processes:
+        return
+    for process in list(processes.values()):
+        if process.is_alive():
+            process.terminate()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Check full velocity-shape convergence for bmax/aH=0.1 and 10 across Dungeon conditions."
@@ -231,9 +239,15 @@ def main() -> None:
         "--scale-mode",
         choices=("separate", "all"),
         default="separate",
-        help="separate scales vres/rhores/angle one at a time; all scales every numerical dimension together.",
+        help="separate scales vres and impact_angle separately; all scales every numerical dimension together.",
     )
-    parser.add_argument("--axes", nargs="+", default=list(DEFAULT_RESOLUTION_AXES), choices=("vres", "rhores", "angle"))
+    parser.add_argument(
+        "--axes",
+        nargs="+",
+        default=list(DEFAULT_RESOLUTION_AXES),
+        choices=("vres", "impact_angle", "rhores", "angle"),
+        help="impact_angle scales rhores, ures, and dphires together. rhores/angle are aliases.",
+    )
     parser.add_argument("--workers", type=int, default=int(os.environ.get("DUNGEON_CPU_CORES", "20")))
     parser.add_argument("--gpus", type=int, default=int(os.environ.get("DUNGEON_GPUS", "2")))
     parser.add_argument(
@@ -245,7 +259,9 @@ def main() -> None:
 
     factors = [float(value) for value in args.factors.split(",") if value.strip()]
     velocities = log_velocity_grid(args.min_velocity_cm_s, args.max_velocity_cm_s, args.curve_points)
-    resolution_axes = ["all"] if args.scale_mode == "all" else list(args.axes)
+    resolution_axes = ["all"] if args.scale_mode == "all" else [
+        "impact_angle" if axis in {"rhores", "angle"} else axis for axis in args.axes
+    ]
     jobs = []
     task_id = 1
     for condition in args.conditions:
@@ -266,7 +282,8 @@ def main() -> None:
     )
 
     rows: list[dict[str, object]] = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as pool:
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=worker_count)
+    try:
         futures = {
             pool.submit(run_curve_point, task_id, condition, velocity_cm_s, factor, resolution_axis, gpu_count): (
                 condition,
@@ -286,6 +303,19 @@ def main() -> None:
                 f"velocity_cm_s={velocity_cm_s:.6e} rows={len(curve_rows)}",
                 flush=True,
             )
+    except KeyboardInterrupt:
+        print("[shape convergence interrupted] terminating worker processes", flush=True)
+        for future in futures:
+            future.cancel()
+        terminate_pool_workers(pool)
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    except BaseException:
+        terminate_pool_workers(pool)
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True, cancel_futures=False)
 
     rows.sort(
         key=lambda row: (

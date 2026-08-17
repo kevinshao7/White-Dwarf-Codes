@@ -79,12 +79,13 @@ velocity, for the same two extreme bmax values:
 python3 run_shape_resolution_convergence_extreme_bmax.py --workers 20 --gpus 2
 ```
 
-By default this uses 10 log-spaced velocity samples and resolution factors
-`0.1, 0.3, 1, 3`.
+By default this uses condition `0`, 10 log-spaced velocity samples, resolution
+factors `0.1, 0.3, 1, 3`, and two convergence axes: `vres` and
+`impact_angle`. The `impact_angle` axis scales `rhores`, `ures`, and `dphires`
+together.
 
 This writes:
 
 - `shape_resolution_convergence_extreme_bmax.csv`
 - `condition_*_vres_shape_resolution_convergence_extreme_bmax.png`
-- `condition_*_rhores_shape_resolution_convergence_extreme_bmax.png`
-- `condition_*_angle_shape_resolution_convergence_extreme_bmax.png`
+- `condition_*_impact_angle_shape_resolution_convergence_extreme_bmax.png`
