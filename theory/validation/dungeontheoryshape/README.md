@@ -45,3 +45,29 @@ Outputs:
 - `condition_1_dungeon_impact_parameter_shape.png`
 - `condition_2_dungeon_impact_parameter_shape.png`
 - `condition_3_dungeon_impact_parameter_shape.png`
+
+## One-Case Resolution Convergence
+
+To rerun one case at `0.1, 0.3, 1, 3, 10` times the default numerical
+integration resolution:
+
+```bash
+python3 run_resolution_convergence_case.py --condition 3 --velocity-cm-s 1e8
+```
+
+This scales `vres`, `rhores`, `ures`, and `dphires` together and writes:
+
+- `resolution_convergence_case.csv`
+- `resolution_convergence_case.png`
+
+To check the two extreme `bmax/aH` values, `0.1` and `10`, for every condition
+with up to 20 CPU workers and 2 GPUs:
+
+```bash
+python3 run_extreme_bmax_resolution_convergence.py --velocity-cm-s 1e8 --workers 20 --gpus 2
+```
+
+This writes:
+
+- `extreme_bmax_resolution_convergence.csv`
+- `extreme_bmax_resolution_convergence.png`

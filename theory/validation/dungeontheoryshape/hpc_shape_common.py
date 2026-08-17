@@ -61,12 +61,17 @@ def log_velocity_grid(minimum_cm_s: float, maximum_cm_s: float, points: int) -> 
     return [float(value) for value in np.geomspace(minimum_cm_s, maximum_cm_s, points)]
 
 
-def task_resolution(vres: int = DEFAULT_VRES) -> dict[str, int]:
+def task_resolution(
+    vres: int = DEFAULT_VRES,
+    rhores: int = SHARED_RHORES,
+    ures: int = BASE_UDPHIRES,
+    dphires: int = BASE_UDPHIRES,
+) -> dict[str, int]:
     return {
         "vres": int(vres),
-        "rhores": SHARED_RHORES,
-        "ures": BASE_UDPHIRES,
-        "dphires": BASE_UDPHIRES,
+        "rhores": int(rhores),
+        "ures": int(ures),
+        "dphires": int(dphires),
     }
 
 
@@ -190,10 +195,13 @@ def run_condition_velocity_task(task: dict[str, str | int | float]) -> list[dict
     condition = int(task["condition"])
     velocity_cm_s = float(task["velocity_cm_s"])
     vres = int(task["vres"])
+    rhores = int(task.get("rhores", SHARED_RHORES))
+    ures = int(task.get("ures", BASE_UDPHIRES))
+    dphires = int(task.get("dphires", BASE_UDPHIRES))
     gpu_id = int(task.get("gpu_id", os.environ.get("DUNGEON_GPU_ID", "-1")))
     cp = optional_cupy()
     use_gpu_reduction = can_use_gpu_reduction(cp, gpu_id)
-    resolution = task_resolution(vres=vres)
+    resolution = task_resolution(vres=vres, rhores=rhores, ures=ures, dphires=dphires)
     max_bmax_over_aH = max(BMAX_OVER_AH)
     if max_bmax_over_aH != SHARED_BMAX_OVER_AH:
         raise ValueError("BMAX_OVER_AH must include SHARED_BMAX_OVER_AH as its largest cutoff")
