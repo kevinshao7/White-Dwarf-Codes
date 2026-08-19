@@ -16,12 +16,15 @@ if str(THEORY_DIR) not in sys.path:
     sys.path.insert(0, str(THEORY_DIR))
 
 try:
-    from .finite.finite_launch import FiniteLaunchDrag
+    from ..finite.finite_launch import DEFAULT_METHOD, METHODS, FiniteLaunchDrag
 except ImportError:
-    from finite.finite_launch import FiniteLaunchDrag
+    from theory.finite.finite_launch import DEFAULT_METHOD, METHODS, FiniteLaunchDrag
 
 CM_PER_S_TO_M_PER_S = 1.0e-2
-DEFAULT_CUTOFF_RADIUS_FACTOR = 50.0
+# r_i = launch radius in units of the hydrogen interparticle spacing a_H.
+DEFAULT_CUTOFF_RADIUS_FACTOR = 1.0
+# b_max = DEFAULT_RHOMAX_FRACTION * r_i.  1.0 covers the whole launch sphere.
+DEFAULT_RHOMAX_FRACTION = 1.0
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -31,6 +34,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--rhores", type=int, default=180)
     parser.add_argument("--ures", type=int, default=180)
     parser.add_argument("--dphires", type=int, default=180)
+    parser.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD)
+    parser.add_argument("--quad-epsabs", type=float, default=0.0)
+    parser.add_argument("--quad-epsrel", type=float, default=1.0e-8)
+    parser.add_argument("--quad-limit", type=int, default=200)
     return parser
 
 
@@ -42,16 +49,28 @@ def make_drag(
     dphires: int = 180,
     cutoff_radius_factor: float = DEFAULT_CUTOFF_RADIUS_FACTOR,
     vrel_sigma_width: float = 4.0,
-    rhomax_fraction: float = 0.3,
+    rhomax_fraction: float = DEFAULT_RHOMAX_FRACTION,
     dphi_endpoint_fraction: float = 1.0e-5,
     acipc: float = 1.0,
+    method: str = DEFAULT_METHOD,
+    quad_epsabs: float = 0.0,
+    quad_epsrel: float = 1.0e-8,
+    quad_limit: int = 200,
 ) -> FiniteLaunchDrag:
     """Construct the finite-launch drag solver.
 
-    Particles start at `r_start = cutoff_radius_factor * a_H`.  Their angular
-    momentum is computed from finite launch geometry,
-    `L = mu * r_start * v_start * sin(theta)`, not from the infinite-distance
-    approximation `L = mu * b * v`.
+    Particles start on a sphere of radius `r_i = cutoff_radius_factor * a_H`
+    with relative speed `v_i`, conserved energy `E = mu v_i^2 / 2 + U(r_i)` and
+    angular momentum `L = mu b v_i`, where `b` is the finite-launch impact
+    parameter.  The scattering angle is `theta = pi - dphi - 2 alpha` with
+    `sin(alpha) = b / r_i`, which vanishes identically for a free particle and
+    reduces to `theta = pi - dphi` as `r_i -> infinity`.
+
+    `cutoff_radius_factor` and `rhomax_fraction` are the two fit handles:
+    they set `r_i` and `b_max = rhomax_fraction * r_i` respectively.
+
+    `method` selects the quadrature (`"quad_quad"`, `"quad_angle"`,
+    `"vectorized"`); the physics is identical in all three.
     """
     if acipc != 1.0:
         raise ValueError("acipc is fixed at 1 and is no longer a fit parameter")
@@ -65,6 +84,10 @@ def make_drag(
         rhomax_fraction=rhomax_fraction,
         dphi_endpoint_fraction=dphi_endpoint_fraction,
         acipc=acipc,
+        method=method,
+        quad_epsabs=quad_epsabs,
+        quad_epsrel=quad_epsrel,
+        quad_limit=quad_limit,
     )
     if cutoff_radius_factor != 1.0:
         set_cutoff_radius_factor(drag, cutoff_radius_factor)
@@ -72,6 +95,7 @@ def make_drag(
 
 
 def set_cutoff_radius_factor(drag: FiniteLaunchDrag, factor: float) -> None:
+    """Set the launch radius to `factor * a_H` and refresh `U(r_i)`."""
     if factor <= 0.0:
         raise ValueError("cutoff_radius_factor must be positive")
     radius = factor / drag.ustart
@@ -102,10 +126,12 @@ def cutoff_defaults(condition: int) -> dict[str, float | str]:
         "default_outer_radius_m": drag.launch_radius(),
         "hydrogen_interparticle_spacing_m": interparticle_spacing_m,
         "electron_debye_radius_m": drag.lD,
+        "yukawa_screening_length_m": 1.0 / drag.k0,
         "default_rhomax_m": drag.launch_pmax(),
         "default_angle_cutoff_m": drag.launch_radius(),
         "default_acipc": drag.acipc,
         "default_vrel_sigma_width": drag.vrel_sigma_width,
+        "default_method": drag.method,
     }
 
 

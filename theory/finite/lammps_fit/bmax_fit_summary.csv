@@ -1,0 +1,5 @@
+at_upper_bound,best_bmax_over_aH,best_bmax_over_aH_sigma,condition,converged,method,n_function_evals,n_points,reduced_chi2,resolution_rhores_dphires,vres
+False,0.22429678898663236,0.04711456339048215,0,True,vectorized,6,8,35.934646721990575,360,101
+True,0.9999999995493098,72.315775161566,1,True,vectorized,8,8,123.0562012139779,360,101
+False,0.815843767197974,0.1797545685226571,2,True,vectorized,11,8,7.991941490270016,360,101
+True,0.9999999999930402,150.1551680000804,3,True,vectorized,8,8,116.55215529407053,360,101
