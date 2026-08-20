@@ -53,12 +53,20 @@ time before the old one-line-per-iteration summary printed at all.
 - `bmax_fit_summary.csv` -- one row per condition: best-fit `b_max/a_H`,
   its 1-sigma uncertainty (from the least-squares Jacobian covariance),
   reduced chi^2, convergence flag, and whether the fit sits on the upper
-  bound.
+  bound. For the weakly-coupled conditions (`gcc=1e-5`: 0 and 2), also
+  `best_bmax_over_debye_length` and its 1-sigma uncertainty -- `b_max`
+  expressed as a fraction of the electron Debye length `lambda_De`
+  (`DragFourth.lD` in `theory/dragbase2.py`), plus the raw
+  `hydrogen_spacing_m`/`debye_length_m` used to convert between the two
+  ratios. NaN for the strongly-coupled conditions (1, 3), where the Debye
+  length is not the relevant screening scale.
 - `bmax_fit_predictions.csv` -- per fit-point model vs. data acceleration,
   log residual, and weighted log residual.
 - `condition_<n>_bmax_fit_overlay.png` -- all LAMMPS points (gray), the
   points actually used in the fit (red, with error bars), and the fitted
-  model curve (blue), log-log velocity vs. acceleration.
+  model curve (blue), log-log velocity vs. acceleration. A lightly shaded
+  blue band shows the model curve at `b_max/a_H` +/-1 sigma. For conditions
+  0 and 2, the title/legend also report `b_max/lambda_De`.
 
 ## Caveats
 

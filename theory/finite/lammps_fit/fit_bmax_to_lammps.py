@@ -58,10 +58,15 @@ if str(THEORY_DIR) not in sys.path:
 
 from finite.finite_launch import DEFAULT_METHOD, FiniteLaunchDrag  # noqa: E402
 from finite.progress import run_pool_with_heartbeat  # noqa: E402
+from dragbase2 import DragFourth  # noqa: E402
 
 CM_PER_S_TO_M_PER_S = 1.0e-2
 ALL_CONDITIONS = (0, 1, 2, 3)
 DAIS_CONDITIONS = (0, 2)
+# gccarr = [1e-5, 1, 1e-5, 1] in DragFourth: conditions 0 and 2 are the
+# weakly-coupled (low mass-density) cases, so only for those does the
+# electron Debye length set the relevant screening scale for b_max.
+WEAKLY_COUPLED_CONDITIONS = (0, 2)
 DEFAULT_BMAX_MIN = 1.0e-2
 DEFAULT_BMAX_MAX = 1.0
 DEFAULT_POINTS_PER_CONDITION = 8
@@ -229,6 +234,26 @@ def make_drag_for_fit(condition: int, bmax_over_aH: float, method: str, resoluti
     )
 
 
+_SCALE_CACHE: dict[int, tuple[float, float]] = {}
+
+
+def hydrogen_spacing_and_debye_length_m(condition: int) -> tuple[float, float]:
+    """Return (a_H, electron Debye length) in meters for a condition.
+
+    Both are fixed algebraic quantities set in `DragFourth.__init__`
+    (`theory/dragbase2.py`), independent of the fit's `rhomax_fraction` --
+    cache per condition instead of instantiating on every call.
+    """
+    cached = _SCALE_CACHE.get(condition)
+    if cached is None:
+        base = DragFourth(condition)
+        a_H = 1.0 / float(base.ustart)
+        debye_length = float(base.lD)
+        cached = (a_H, debye_length)
+        _SCALE_CACHE[condition] = cached
+    return cached
+
+
 def run_fit_point_case(task: tuple[int, float, DataPoint, str, int, int]) -> dict[str, object]:
     condition, bmax_over_aH, point, method, resolution, vres = task
     drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
@@ -281,7 +306,7 @@ def fit_condition(
     max_nfev: int,
     progress: bool,
     heartbeat_seconds: float,
-) -> tuple[dict[str, object], list[dict[str, object]]]:
+) -> tuple[dict[str, object], list[dict[str, object]], dict[str, list[dict[str, object]]]]:
     eval_counter = 0
 
     def residual_vector(params: np.ndarray) -> np.ndarray:
@@ -342,11 +367,24 @@ def fit_condition(
     )
     reduced_chi2 = float(np.sum(np.square(result.fun)) / max(1, len(points) - 1))
 
+    a_H_m, debye_length_m = hydrogen_spacing_and_debye_length_m(condition)
+    best_bmax_over_lD = math.nan
+    best_bmax_over_lD_sigma = math.nan
+    if condition in WEAKLY_COUPLED_CONDITIONS:
+        aH_over_lD = a_H_m / debye_length_m
+        best_bmax_over_lD = best_bmax_over_aH * aH_over_lD
+        if np.isfinite(sigma):
+            best_bmax_over_lD_sigma = sigma * aH_over_lD
+
     summary = {
         "condition": condition,
         "n_points": len(points),
         "best_bmax_over_aH": best_bmax_over_aH,
         "best_bmax_over_aH_sigma": sigma,
+        "best_bmax_over_debye_length": best_bmax_over_lD,
+        "best_bmax_over_debye_length_sigma": best_bmax_over_lD_sigma,
+        "hydrogen_spacing_m": a_H_m,
+        "debye_length_m": debye_length_m,
         "at_upper_bound": math.isclose(best_bmax_over_aH, bmax_max, rel_tol=1e-6),
         "reduced_chi2": reduced_chi2,
         "n_function_evals": result.nfev,
@@ -355,10 +393,36 @@ def fit_condition(
         "resolution_rhores_dphires": resolution,
         "vres": vres,
     }
-    return summary, prediction_rows
+
+    # +/-1 sigma model curves for the shaded uncertainty band in the overlay
+    # plot. Only evaluated at the fit points already computed above -- cheap
+    # relative to the least_squares iterations themselves (two extra passes
+    # instead of dozens).
+    uncertainty_rows: dict[str, list[dict[str, object]]] = {"low": [], "high": []}
+    if np.isfinite(sigma) and sigma > 0:
+        bmax_low = max(bmax_min, best_bmax_over_aH - sigma)
+        bmax_high = min(bmax_max, best_bmax_over_aH + sigma)
+        low_tasks = [(condition, bmax_low, point, method, resolution, vres) for point in points]
+        high_tasks = [(condition, bmax_high, point, method, resolution, vres) for point in points]
+        uncertainty_rows["low"] = run_pool_with_heartbeat(
+            pool, low_tasks, run_fit_point_case, heartbeat_seconds=heartbeat_seconds,
+            label=f"cond{condition} -1sigma", quiet=not progress,
+        )
+        uncertainty_rows["high"] = run_pool_with_heartbeat(
+            pool, high_tasks, run_fit_point_case, heartbeat_seconds=heartbeat_seconds,
+            label=f"cond{condition} +1sigma", quiet=not progress,
+        )
+
+    return summary, prediction_rows, uncertainty_rows
 
 
-def make_overlay_plot(condition: int, summary: dict[str, object], prediction_rows: list[dict[str, object]], all_points: list[DataPoint]) -> None:
+def make_overlay_plot(
+    condition: int,
+    summary: dict[str, object],
+    prediction_rows: list[dict[str, object]],
+    all_points: list[DataPoint],
+    uncertainty_rows: dict[str, list[dict[str, object]]] | None = None,
+) -> None:
     fig, axis = plt.subplots(figsize=(8, 6))
 
     all_v = np.array([p.velocity_cm_s for p in all_points if p.condition == condition])
@@ -368,18 +432,43 @@ def make_overlay_plot(condition: int, summary: dict[str, object], prediction_row
     fit_v = np.array([row["velocity_cm_s"] for row in prediction_rows])
     fit_a = np.array([row["data_acceleration_cm_s2"] for row in prediction_rows])
     fit_sigma = np.array([row["data_acceleration_sigma_cm_s2"] for row in prediction_rows])
-    axis.errorbar(fit_v, fit_a, yerr=fit_sigma, fmt="o", color="tab:red", markersize=6, capsize=3, label="fit points", zorder=3)
+    axis.errorbar(fit_v, fit_a, yerr=fit_sigma, fmt="o", color="tab:red", markersize=6, capsize=3, label="fit points", zorder=4)
 
     order = np.argsort(fit_v)
     model_v = fit_v[order]
     model_a = np.array([row["model_acceleration_cm_s2"] for row in prediction_rows])[order]
-    axis.plot(model_v, model_a, color="tab:blue", linewidth=2.0, marker="s", markersize=4, label=f"model, $b_{{max}}/a_H={summary['best_bmax_over_aH']:.4g}$", zorder=2)
+
+    # Lightly shaded +/-1 sigma band from the fitted b_max uncertainty, drawn
+    # under the fit points/curve.
+    low_rows = uncertainty_rows.get("low") if uncertainty_rows else None
+    high_rows = uncertainty_rows.get("high") if uncertainty_rows else None
+    if low_rows and high_rows:
+        low_a = np.array([row["model_acceleration_cm_s2"] for row in low_rows])[order]
+        high_a = np.array([row["model_acceleration_cm_s2"] for row in high_rows])[order]
+        band_low = np.minimum(low_a, high_a)
+        band_high = np.maximum(low_a, high_a)
+        axis.fill_between(
+            model_v, band_low, band_high,
+            color="tab:blue", alpha=0.15, linewidth=0,
+            label=r"model $\pm1\sigma$", zorder=1.5,
+        )
+
+    model_label = f"model, $b_{{max}}/a_H={summary['best_bmax_over_aH']:.4g}$"
+    best_bmax_over_lD = summary.get("best_bmax_over_debye_length", math.nan)
+    if condition in WEAKLY_COUPLED_CONDITIONS and np.isfinite(best_bmax_over_lD):
+        model_label += f"\n$b_{{max}}/\\lambda_{{De}}={best_bmax_over_lD:.3g}$"
+    axis.plot(model_v, model_a, color="tab:blue", linewidth=2.0, marker="s", markersize=4, label=model_label, zorder=3)
 
     axis.set_xscale("log")
     axis.set_yscale("log")
     axis.set_xlabel("velocity [cm/s]")
     axis.set_ylabel("acceleration [cm/s^2]")
-    axis.set_title(f"Condition {condition}: b_max fit ($r_i=a_H$ fixed), reduced chi2={summary['reduced_chi2']:.3g}")
+    title = f"Condition {condition}: b_max fit ($r_i=a_H$ fixed), reduced chi2={summary['reduced_chi2']:.3g}"
+    if condition in WEAKLY_COUPLED_CONDITIONS and np.isfinite(best_bmax_over_lD):
+        sigma_lD = summary.get("best_bmax_over_debye_length_sigma", math.nan)
+        sigma_str = f"{sigma_lD:.2g}" if np.isfinite(sigma_lD) else "n/a"
+        title += f"\n$b_{{max}}/\\lambda_{{De}}={best_bmax_over_lD:.3g}\\pm{sigma_str}$ (weakly coupled)"
+    axis.set_title(title)
     axis.grid(True, which="both", alpha=0.25)
     axis.legend(fontsize=9)
     fig.tight_layout()
@@ -452,7 +541,7 @@ def main() -> None:
                 print(f"Condition {condition}: no fit points after selection, skipping.", flush=True)
                 continue
             print(f"Condition {condition}: fitting b_max/a_H against {len(condition_points)} points.", flush=True)
-            summary, prediction_rows = fit_condition(
+            summary, prediction_rows, uncertainty_rows = fit_condition(
                 pool,
                 condition,
                 condition_points,
@@ -477,9 +566,15 @@ def main() -> None:
                 f"reduced chi2 = {summary['reduced_chi2']:.4g}, converged={summary['converged']}.",
                 flush=True,
             )
+            if condition in WEAKLY_COUPLED_CONDITIONS and np.isfinite(summary["best_bmax_over_debye_length"]):
+                print(
+                    f"  best b_max/lambda_De = {summary['best_bmax_over_debye_length']:.6g} "
+                    f"+/- {summary['best_bmax_over_debye_length_sigma']:.3g} (weakly coupled condition).",
+                    flush=True,
+                )
             summaries.append(summary)
             all_prediction_rows.extend(prediction_rows)
-            make_overlay_plot(condition, summary, prediction_rows, all_points)
+            make_overlay_plot(condition, summary, prediction_rows, all_points, uncertainty_rows)
 
     write_csv(OUTDIR / "bmax_fit_summary.csv", summaries)
     write_csv(OUTDIR / "bmax_fit_predictions.csv", all_prediction_rows)
