@@ -40,7 +40,12 @@ class DragFourth:
         self.T = self.Tarr[conditions]
         self.nh = 1e6*self.gcc/(1000*self.mh)
         ne =1e6* self.NA*self.z1*self.gcc/1.008 #electron number density in SI
-        ve = np.sqrt(3*self.kb*self.T/self.me)
+        # lD = ve/wp equals the standard single-species Debye length
+        # lD = sqrt(e0 kB T / (n q^2)) only when ve is the 1D thermal speed
+        # sqrt(kB T/me); using the 3D rms speed sqrt(3 kB T/me) here made lD
+        # (and everything built on it: lS, k0, A's screening) sqrt(3) too
+        # large relative to 1/lD^2 = sum_s n_s q_s^2/(e0 kB T_s).
+        ve = np.sqrt(self.kb*self.T/self.me)
         wp = np.sqrt(ne*(self.qe**2)/(self.me*self.e0))
         self.lD = ve/wp
         interparticlespacing = (3/(4*self.pi*self.nh))**(1/3)
