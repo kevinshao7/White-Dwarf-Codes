@@ -15,11 +15,16 @@ Root-find rather than least_squares: one point, one parameter, so the
 residual is a single scalar, and its zero (in log(b_max/a_H), since b_max
 spans decades) is exactly what `least_squares` would converge to anyway --
 without the Jacobian/covariance machinery `fit_bmax_to_lammps.fit_condition`
-needs for an over-determined fit. `scipy.optimize.brentq` needs a bracket
-(a sign change): if the model cannot reach the data acceleration anywhere
-in `[bmax_min, bmax_max]`, the point is reported unconverged at whichever
-bound came closer, mirroring `fit_bmax_to_lammps`'s `at_upper_bound`
-handling rather than silently reporting a boundary value as a real fit.
+needs for an over-determined fit. `scipy.optimize.brentq` needs a bracket (a
+sign change), which it cannot take to literal infinity, so an unbounded
+`bmax_max` (the default: b_max is tied to r_i -- see
+`FiniteLaunchDrag.launch_pmax` -- so there is no `b_max/a_H <= 1` ceiling to
+fit against any more) is handled by growing the trial b_max geometrically
+until a sign change turns up or the search is exhausted. If the model cannot
+reach the data acceleration anywhere the search covered, the point is
+reported unconverged at whichever bound came closer, mirroring
+`fit_bmax_to_lammps`'s `at_upper_bound` handling rather than silently
+reporting a boundary value as a real fit.
 
 Parallel across (condition, point) tasks -- each task is a full,
 independent root-find that runs entirely inside one worker process, so
@@ -38,7 +43,7 @@ import math
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import freeze_support
 from pathlib import Path
 
@@ -66,13 +71,51 @@ _UNREACHABLE_LOG_RESIDUAL = -1.0e30
 _BRENTQ_XTOL = 1.0e-10
 _BRENTQ_RTOL = 1.0e-10
 
+# brentq needs a *finite* bracket, so an unbounded bmax_max (the default,
+# matching fit_bmax_to_lammps.DEFAULT_BMAX_MAX = inf now that b_max is tied
+# to r_i -- see FiniteLaunchDrag.launch_pmax) is handled by growing the upper
+# end geometrically until a sign change turns up, mirroring the doubling
+# bracket search FiniteLaunchDrag.closest_approach_u uses for its own root.
+# Each step multiplies the trial b_max/a_H by e^_BRACKET_LOG_STEP (~148x);
+# _BRACKET_MAX_STEPS=130 caps the total growth at log(b_max) ~ 650, safely
+# under math.exp's ~709 overflow ceiling, while still reaching b_max/a_H
+# ~1e280 -- far past any physically relevant screening length, so exhausting
+# the search means the model genuinely cannot reach the data even as
+# r_i -> infinity, not that the search gave up too early.
+_BRACKET_LOG_STEP = 5.0
+_BRACKET_MAX_STEPS = 130
+
 
 def _model_and_log_residual(
-    condition: int, bmax_over_aH: float, point: common.DataPoint, method: str, resolution: int, vres: int
+    condition: int,
+    bmax_over_aH: float,
+    point: common.DataPoint,
+    method: str,
+    resolution: int,
+    vres: int,
+    gpu_device: int | None = None,
 ) -> tuple[float, float]:
-    """Return ``(model_acceleration_cm_s2, log(model) - log(data))``."""
+    """Return ``(model_acceleration_cm_s2, log(model) - log(data))``.
+
+    ``gpu_device`` (a CUDA device id), when given, batches this single
+    model evaluation through ``FiniteLaunchDrag.drag_batch(xp=cupy)`` on
+    that device instead of the scalar CPU ``drag()``. Even for one point,
+    this still captures ``drag_batch``'s real win -- batching the
+    ``vres x rhores x dphires`` grid into one set of array ops instead of
+    a serial Python loop over ``vres`` -- see that method's docstring for
+    the GPU-untested caveat. ``None`` (the default) is the unchanged,
+    process-pool-compatible CPU path; ``cupy`` is imported lazily so it is
+    never required unless a GPU device is actually requested.
+    """
     drag = base.make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
-    force_n = base.quiet_drag(drag, point.velocity_cm_s * base.CM_PER_S_TO_M_PER_S)
+    velocity_m_s = point.velocity_cm_s * base.CM_PER_S_TO_M_PER_S
+    if gpu_device is None:
+        force_n = base.quiet_drag(drag, velocity_m_s)
+    else:
+        import cupy
+
+        with cupy.cuda.Device(gpu_device):
+            force_n = float(cupy.asnumpy(drag.drag_batch(cupy.asarray([velocity_m_s]), xp=cupy))[0])
     model_accel = abs(force_n / drag.ms) * 100.0
     if model_accel <= 0.0 or not math.isfinite(model_accel):
         return model_accel, _UNREACHABLE_LOG_RESIDUAL
@@ -80,19 +123,39 @@ def _model_and_log_residual(
 
 
 def solve_bmax_for_point(
-    task: tuple[int, common.DataPoint, str, int, int, float, float],
+    task: tuple[int, common.DataPoint, str, int, int, float, float, int | None],
 ) -> dict[str, object]:
-    """Worker: root-find ``b_max/a_H`` for one (condition, point) pair."""
-    condition, point, method, resolution, vres, bmax_min, bmax_max = task
+    """Worker: root-find ``b_max/a_H`` for one (condition, point) pair.
+
+    The trailing ``gpu_device`` in ``task`` (``None`` for the CPU path)
+    batches every brentq evaluation onto that CUDA device instead -- see
+    ``_model_and_log_residual``.
+    """
+    condition, point, method, resolution, vres, bmax_min, bmax_max, gpu_device = task
 
     def objective(log_bmax: float) -> float:
-        _, residual = _model_and_log_residual(condition, math.exp(log_bmax), point, method, resolution, vres)
+        _, residual = _model_and_log_residual(
+            condition, math.exp(log_bmax), point, method, resolution, vres, gpu_device
+        )
         return residual
 
     log_min = math.log(bmax_min)
-    log_max = math.log(bmax_max)
     resid_min = objective(log_min)
-    resid_max = objective(log_max)
+
+    if math.isfinite(bmax_max):
+        log_max = math.log(bmax_max)
+        resid_max = objective(log_max)
+    else:
+        # No finite ceiling: grow the trial b_max geometrically until the
+        # residual changes sign or the search is exhausted (see
+        # _BRACKET_LOG_STEP/_BRACKET_MAX_STEPS above).
+        log_max = max(log_min, 0.0) + _BRACKET_LOG_STEP
+        resid_max = objective(log_max)
+        steps = 0
+        while resid_min * resid_max >= 0.0 and steps < _BRACKET_MAX_STEPS:
+            log_max += _BRACKET_LOG_STEP
+            resid_max = objective(log_max)
+            steps += 1
 
     at_lower_bound = False
     at_upper_bound = False
@@ -105,10 +168,13 @@ def solve_bmax_for_point(
             best_bmax = bmax_min
             at_lower_bound = True
         else:
-            best_bmax = bmax_max
+            best_bmax = math.exp(log_max)
             at_upper_bound = True
         # Only a genuine root if it landed exactly on a bound; otherwise the
-        # model can't reach the data anywhere in [bmax_min, bmax_max].
+        # model can't reach the data anywhere the search covered -- for an
+        # unbounded bmax_max that means not even as r_i -> infinity (the
+        # Yukawa screening makes the drag saturate, so this is a real
+        # model-vs-data mismatch, not a search that gave up too early).
         converged = resid_min == 0.0 or resid_max == 0.0
 
     model_accel, log_residual = _model_and_log_residual(condition, best_bmax, point, method, resolution, vres)
@@ -179,6 +245,38 @@ def make_per_point_plot(condition: int, rows: list[dict[str, object]], all_point
     plt.close(fig)
 
 
+def run_gpu(
+    tasks: list[tuple[int, common.DataPoint, str, int, int, float, float]],
+    gpu_devices: list[int],
+    quiet: bool,
+) -> list[dict[str, object]]:
+    """GPU counterpart of the ``ProcessPoolExecutor`` dispatch below: splits
+    ``tasks`` ~evenly across ``gpu_devices`` and runs each device's chunk of
+    independent per-point brentq root-finds sequentially in its own thread
+    (so the devices work concurrently) -- each individual solve is itself a
+    batch of ``FiniteLaunchDrag.drag_batch`` calls, see
+    ``_model_and_log_residual``'s docstring for the GPU-untested caveat.
+    Threads rather than processes: CUDA contexts don't survive
+    ``multiprocessing``'s spawn-based process creation cleanly on Windows,
+    and cupy releases the GIL around device work, so two Python threads are
+    enough to keep both GPUs busy concurrently.
+    """
+    chunks = np.array_split(np.arange(len(tasks)), len(gpu_devices))
+    rows: list[dict[str, object] | None] = [None] * len(tasks)
+
+    def run_chunk(device_id: int, indices: np.ndarray) -> None:
+        for n, i in enumerate(indices, start=1):
+            rows[i] = solve_bmax_for_point((*tasks[i], device_id))
+            if not quiet:
+                print(f"[gpu{device_id}] {n}/{len(indices)} points done", flush=True)
+
+    with ThreadPoolExecutor(max_workers=len(gpu_devices)) as pool:
+        futures = [pool.submit(run_chunk, device, idx) for device, idx in zip(gpu_devices, chunks) if idx.size]
+        for future in futures:
+            future.result()
+    return [row for row in rows if row is not None]
+
+
 def make_combined_plot(rows: list[dict[str, object]]) -> None:
     fig, axis = plt.subplots(figsize=(9, 6.5))
     colors = {0: "tab:blue", 1: "tab:orange", 2: "tab:green", 3: "tab:red"}
@@ -213,6 +311,7 @@ def main() -> None:
         help="quantile groups per condition before per-point solving (see fit_bmax_to_lammps.select_fit_points)",
     )
     args = parser.parse_args()
+    gpu_devices = base.parse_gpu_devices(args.gpu_devices)
 
     all_points, filtered, conditions = common.load_and_filter_points(args)
     fit_points = base.select_fit_points(filtered, args.points_per_condition)
@@ -229,11 +328,14 @@ def main() -> None:
     ]
 
     start = time.perf_counter()
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        rows = base.run_pool_with_heartbeat(
-            pool, tasks, solve_bmax_for_point,
-            heartbeat_seconds=args.heartbeat_seconds, label="per-point fit", quiet=args.quiet,
-        )
+    if gpu_devices:
+        rows = run_gpu(tasks, gpu_devices, args.quiet)
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            rows = base.run_pool_with_heartbeat(
+                pool, [(*task, None) for task in tasks], solve_bmax_for_point,
+                heartbeat_seconds=args.heartbeat_seconds, label="per-point fit", quiet=args.quiet,
+            )
 
     n_unconverged = sum(1 for row in rows if not row["converged"])
     if n_unconverged:

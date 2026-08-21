@@ -2,19 +2,23 @@
 #   python .\theory\finite\lammps_fit\fit_bmax_to_lammps.py --workers 8
 """Fit the impact-parameter cutoff b_max/a_H to LAMMPS drag simulations.
 
-Single free parameter per condition: `rhomax_fraction = b_max / r_i`, with the
-launch radius fixed at `r_i = a_H` (the hydrogen interparticle spacing) --
-this is a deliberate simplification of the old
-`theory/validation/impactparameterfit/fit_bmax_to_lammps.py`, which fit
+Single free parameter per condition: `rhomax_fraction = b_max / a_H = r_i /
+a_H`, with the launch radius itself `r_i = rhomax_fraction * a_H` (`a_H` the
+hydrogen interparticle spacing) -- this is a deliberate simplification of the
+old `theory/validation/impactparameterfit/fit_bmax_to_lammps.py`, which fit
 `b_max` against a separately-tunable launch radius `r_i = 50 a_H` (that
 script's `cutoff_radius_factor`). In the finite-launch model implemented here
 (`theory/finite/finite_launch.py`), there is no separate scattering-angle
 cutoff to tie to `b_max`: the deflection is integrated exactly from launch to
 closest approach, so `b_max` alone bounds both integrals by construction.
-That also means the fit is now bounded to `b_max/a_H <= 1` (a tangent
-launch), a narrower range than the old model's `<= 50`; a best fit that wants
-to sit at the 1.0 boundary is a sign the new geometry cannot reach the old
-model's answer, not a bug -- report it, don't hide it.
+`FiniteLaunchDrag.launch_pmax` forces `b_max == r_i` always (a tangent
+launch), so `rhomax_fraction` moves both together rather than being bounded
+above by a separately-fixed `r_i` -- the fit's upper bound defaults to
+infinity (`DEFAULT_BMAX_MAX`); a best fit that still runs away unbounded is a
+sign that even an arbitrarily distant launch sphere cannot reach the data
+(the model saturates as `r_i -> infinity`, since the Yukawa screening kills
+the contribution from very large impact parameters), not a bug -- report it,
+don't hide it.
 
 Point selection is likewise simplified from the old script's per-campaign
 regex grouping: points are ranked by velocity, split into
@@ -39,7 +43,7 @@ import os
 import sys
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import freeze_support
 from pathlib import Path
@@ -68,7 +72,10 @@ DAIS_CONDITIONS = (0, 2)
 # electron Debye length set the relevant screening scale for b_max.
 WEAKLY_COUPLED_CONDITIONS = (0, 2)
 DEFAULT_BMAX_MIN = 1.0e-2
-DEFAULT_BMAX_MAX = 1.0
+# b_max is tied to r_i (FiniteLaunchDrag.launch_pmax: b_max == r_i always), so
+# there is no b_max/a_H <= 1 ceiling to enforce -- fitting rhomax_fraction
+# unbounded above just moves the whole launch sphere outward.
+DEFAULT_BMAX_MAX = math.inf
 DEFAULT_POINTS_PER_CONDITION = 8
 # rhores = dphires = 360 keeps the 'vectorized' scheme within ~9e-4 relative
 # error of the quad_quad reference (worst case 8.7e-4) across the conditions
@@ -234,6 +241,18 @@ def make_drag_for_fit(condition: int, bmax_over_aH: float, method: str, resoluti
     )
 
 
+def parse_gpu_devices(raw: str | None) -> list[int] | None:
+    """Parse ``--gpu-devices`` (e.g. ``"0,1"``) into a device-id list.
+
+    ``None``/empty means CPU dispatch via the existing ``ProcessPoolExecutor``
+    path -- the unchanged default; nothing about GPU dispatch is exercised
+    unless this is explicitly set.
+    """
+    if not raw:
+        return None
+    return [int(item) for item in raw.split(",") if item.strip()]
+
+
 _SCALE_CACHE: dict[int, tuple[float, float]] = {}
 
 
@@ -254,12 +273,10 @@ def hydrogen_spacing_and_debye_length_m(condition: int) -> tuple[float, float]:
     return cached
 
 
-def run_fit_point_case(task: tuple[int, float, DataPoint, str, int, int]) -> dict[str, object]:
-    condition, bmax_over_aH, point, method, resolution, vres = task
-    drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
-    force_n = quiet_drag(drag, point.velocity_cm_s * CM_PER_S_TO_M_PER_S)
-    model_acceleration_cm_s2 = abs(force_n / drag.ms) * 100.0
-
+def _fit_point_row(
+    condition: int, bmax_over_aH: float, point: DataPoint, force_n: float, ms: float
+) -> dict[str, object]:
+    model_acceleration_cm_s2 = abs(force_n / ms) * 100.0
     log_residual = math.nan
     weighted_log_residual = math.nan
     if model_acceleration_cm_s2 > 0.0 and point.acceleration_cm_s2 > 0.0:
@@ -279,6 +296,66 @@ def run_fit_point_case(task: tuple[int, float, DataPoint, str, int, int]) -> dic
         "log_residual": log_residual,
         "weighted_log_residual": weighted_log_residual,
     }
+
+
+def run_fit_point_case(task: tuple[int, float, DataPoint, str, int, int]) -> dict[str, object]:
+    condition, bmax_over_aH, point, method, resolution, vres = task
+    drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
+    force_n = quiet_drag(drag, point.velocity_cm_s * CM_PER_S_TO_M_PER_S)
+    return _fit_point_row(condition, bmax_over_aH, point, force_n, drag.ms)
+
+
+def run_fit_points_gpu(
+    condition: int,
+    bmax_over_aH: float,
+    points: list[DataPoint],
+    method: str,
+    resolution: int,
+    vres: int,
+    gpu_devices: list[int],
+) -> list[dict[str, object]]:
+    """GPU counterpart of calling ``run_fit_point_case`` once per point.
+
+    All points in one ``least_squares`` iteration share the same trial
+    ``bmax_over_aH``, so this builds a single ``FiniteLaunchDrag`` and
+    evaluates every point in one batched ``FiniteLaunchDrag.drag_batch``
+    call per GPU (`theory/finite/finite_launch.py`), splitting the point
+    list ~evenly across ``gpu_devices``. Row order in the result need not
+    match ``points``' order -- ``least_squares``'s sum-of-squares residual
+    and the CSV/plot consumers downstream are both order-independent, only
+    the per-point (data, prediction) pairing has to be correct, which it is
+    by construction here. ``cupy`` is imported lazily so the CPU-only path
+    elsewhere in this module never needs it installed.
+
+    CAVEAT: only exercised against the numpy backend of ``drag_batch`` (see
+    that method's docstring) -- there is no GPU in the development
+    environment this was written in, so the ``cupy`` code path itself has
+    not been run. Spot-check a handful of points' ``--gpu-devices`` output
+    against the CPU path's before trusting a fit that used it.
+    """
+    import cupy
+
+    if not points:
+        return []
+    drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
+    chunks = np.array_split(np.arange(len(points)), len(gpu_devices))
+
+    def run_chunk(device_id: int, idx: np.ndarray) -> list[dict[str, object]]:
+        if idx.size == 0:
+            return []
+        chunk = [points[i] for i in idx]
+        vb = np.array([p.velocity_cm_s * CM_PER_S_TO_M_PER_S for p in chunk], dtype=np.float64)
+        with cupy.cuda.Device(device_id), contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            forces = cupy.asnumpy(drag.drag_batch(cupy.asarray(vb), xp=cupy))
+        return [_fit_point_row(condition, bmax_over_aH, p, float(f), drag.ms) for p, f in zip(chunk, forces)]
+
+    rows: list[dict[str, object]] = []
+    with ThreadPoolExecutor(max_workers=len(gpu_devices)) as pool:
+        futures = [pool.submit(run_chunk, device, idx) for device, idx in zip(gpu_devices, chunks)]
+        for future in futures:
+            rows.extend(future.result())
+    return rows
 
 
 def covariance_sigma(result, n_points: int) -> float:
@@ -306,23 +383,31 @@ def fit_condition(
     max_nfev: int,
     progress: bool,
     heartbeat_seconds: float,
+    gpu_devices: list[int] | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]], dict[str, list[dict[str, object]]]]:
+    """``gpu_devices``, when given (e.g. ``[0, 1]``), evaluates every point
+    batch for a trial ``bmax_over_aH`` via ``run_fit_points_gpu`` instead of
+    submitting one ``run_fit_point_case`` task per point to ``pool`` -- see
+    that function's docstring for the batching rationale and its GPU-
+    untested caveat. ``pool`` is unused in that case but still required by
+    callers that don't know in advance whether GPU dispatch is active.
+    """
     eval_counter = 0
+
+    def evaluate_points(bmax_over_aH: float, subset: list[DataPoint], label: str) -> list[dict[str, object]]:
+        if gpu_devices:
+            return run_fit_points_gpu(condition, bmax_over_aH, subset, method, resolution, vres, gpu_devices)
+        tasks = [(condition, bmax_over_aH, point, method, resolution, vres) for point in subset]
+        return run_pool_with_heartbeat(
+            pool, tasks, run_fit_point_case, heartbeat_seconds=heartbeat_seconds, label=label, quiet=not progress,
+        )
 
     def residual_vector(params: np.ndarray) -> np.ndarray:
         nonlocal eval_counter
         eval_counter += 1
         bmax_over_aH = float(params[0])
-        tasks = [(condition, bmax_over_aH, point, method, resolution, vres) for point in points]
         try:
-            rows = run_pool_with_heartbeat(
-                pool,
-                tasks,
-                run_fit_point_case,
-                heartbeat_seconds=heartbeat_seconds,
-                label=f"cond{condition} eval{eval_counter}",
-                quiet=not progress,
-            )
+            rows = evaluate_points(bmax_over_aH, points, f"cond{condition} eval{eval_counter}")
         except Exception as exc:  # keep the optimizer alive; report a huge residual instead
             if progress:
                 print(f"[fit eval failed] condition={condition} bmax/aH={bmax_over_aH:.6g} error={exc!r}", flush=True)
@@ -356,15 +441,7 @@ def fit_condition(
     best_bmax_over_aH = float(result.x[0])
     sigma = covariance_sigma(result, len(points))
 
-    final_tasks = [(condition, best_bmax_over_aH, point, method, resolution, vres) for point in points]
-    prediction_rows = run_pool_with_heartbeat(
-        pool,
-        final_tasks,
-        run_fit_point_case,
-        heartbeat_seconds=heartbeat_seconds,
-        label=f"cond{condition} final",
-        quiet=not progress,
-    )
+    prediction_rows = evaluate_points(best_bmax_over_aH, points, f"cond{condition} final")
     reduced_chi2 = float(np.sum(np.square(result.fun)) / max(1, len(points) - 1))
 
     a_H_m, debye_length_m = hydrogen_spacing_and_debye_length_m(condition)
@@ -402,16 +479,8 @@ def fit_condition(
     if np.isfinite(sigma) and sigma > 0:
         bmax_low = max(bmax_min, best_bmax_over_aH - sigma)
         bmax_high = min(bmax_max, best_bmax_over_aH + sigma)
-        low_tasks = [(condition, bmax_low, point, method, resolution, vres) for point in points]
-        high_tasks = [(condition, bmax_high, point, method, resolution, vres) for point in points]
-        uncertainty_rows["low"] = run_pool_with_heartbeat(
-            pool, low_tasks, run_fit_point_case, heartbeat_seconds=heartbeat_seconds,
-            label=f"cond{condition} -1sigma", quiet=not progress,
-        )
-        uncertainty_rows["high"] = run_pool_with_heartbeat(
-            pool, high_tasks, run_fit_point_case, heartbeat_seconds=heartbeat_seconds,
-            label=f"cond{condition} +1sigma", quiet=not progress,
-        )
+        uncertainty_rows["low"] = evaluate_points(bmax_low, points, f"cond{condition} -1sigma")
+        uncertainty_rows["high"] = evaluate_points(bmax_high, points, f"cond{condition} +1sigma")
 
     return summary, prediction_rows, uncertainty_rows
 
@@ -505,6 +574,17 @@ def main() -> None:
     parser.add_argument("--max-nfev", type=int, default=30)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
+        "--gpu-devices",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated CUDA device ids (e.g. '0,1') to batch every fit-point "
+            "evaluation across via FiniteLaunchDrag.drag_batch(xp=cupy) instead of the "
+            "CPU --workers process pool. Requires cupy; not exercised on real GPU "
+            "hardware in development -- see run_fit_points_gpu's docstring."
+        ),
+    )
+    parser.add_argument(
         "--heartbeat-seconds",
         type=float,
         default=12.0,
@@ -512,9 +592,8 @@ def main() -> None:
     )
     parser.add_argument("--quiet", action="store_true", help="suppress per-evaluation progress printing")
     args = parser.parse_args()
+    gpu_devices = parse_gpu_devices(args.gpu_devices)
 
-    if args.bmax_max > 1.0:
-        parser.error("bmax-max cannot exceed 1.0: b_max > r_i has no launch geometry in this model")
     if not args.lammps_results.exists():
         parser.error(f"--lammps-results not found: {args.lammps_results}")
 
@@ -534,7 +613,9 @@ def main() -> None:
     start = time.perf_counter()
     summaries: list[dict[str, object]] = []
     all_prediction_rows: list[dict[str, object]] = []
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+    # GPU dispatch never touches the CPU pool (see fit_condition/evaluate_points),
+    # so skip spinning up worker processes that would just sit idle.
+    with contextlib.nullcontext(None) if gpu_devices else ProcessPoolExecutor(max_workers=args.workers) as pool:
         for condition in sorted(conditions):
             condition_points = [p for p in fit_points if p.condition == condition]
             if not condition_points:
@@ -553,12 +634,13 @@ def main() -> None:
                 args.max_nfev,
                 progress=not args.quiet,
                 heartbeat_seconds=args.heartbeat_seconds,
+                gpu_devices=gpu_devices,
             )
             if summary["at_upper_bound"]:
                 print(
-                    f"  WARNING: condition {condition} best fit sits at the b_max/a_H upper bound "
-                    f"({args.bmax_max:g}); the finite-launch model (r_i=a_H fixed) may not be able "
-                    f"to reach this condition's LAMMPS drag at all -- consider allowing r_i to vary.",
+                    f"  WARNING: condition {condition} best fit sits at the explicit b_max/a_H upper "
+                    f"bound ({args.bmax_max:g}) passed via --bmax-max; the default bound is infinity, "
+                    f"so this only fires when that default was overridden.",
                     flush=True,
                 )
             print(

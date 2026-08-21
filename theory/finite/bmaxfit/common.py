@@ -75,6 +75,15 @@ def build_common_parser(description: str | None) -> argparse.ArgumentParser:
     parser.add_argument("--vres", type=int, default=base.DEFAULT_VRES)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
+        "--gpu-devices", type=str, default=None,
+        help=(
+            "Comma-separated CUDA device ids (e.g. '0,1') to batch drag evaluations across "
+            "via FiniteLaunchDrag.drag_batch(xp=cupy) instead of the CPU --workers process "
+            "pool. Requires cupy; see fit_bmax_to_lammps.run_fit_points_gpu's docstring for "
+            "the GPU-untested caveat."
+        ),
+    )
+    parser.add_argument(
         "--heartbeat-seconds", type=float, default=12.0,
         help="Print a status line at least this often even if no task has finished yet.",
     )
@@ -88,8 +97,6 @@ def load_and_filter_points(args: argparse.Namespace) -> tuple[list[DataPoint], l
     callers do their own point *selection* (quantile grouping, regime
     splitting) on top of ``filtered_points``.
     """
-    if args.bmax_max > 1.0:
-        raise SystemExit("--bmax-max cannot exceed 1.0: b_max > r_i has no launch geometry in this model")
     if not args.lammps_results.exists():
         raise SystemExit(f"--lammps-results not found: {args.lammps_results}")
 

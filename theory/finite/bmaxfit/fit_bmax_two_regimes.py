@@ -23,6 +23,7 @@ Run from repository root:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
@@ -125,13 +126,16 @@ def main() -> None:
     )
     parser.add_argument("--max-nfev", type=int, default=DEFAULT_MAX_NFEV)
     args = parser.parse_args()
+    gpu_devices = base.parse_gpu_devices(args.gpu_devices)
 
     all_points, filtered, conditions = common.load_and_filter_points(args)
 
     start = time.perf_counter()
     summaries: list[dict[str, object]] = []
     all_prediction_rows: list[dict[str, object]] = []
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+    # GPU dispatch never touches the CPU pool (see fit_condition/evaluate_points
+    # in fit_bmax_to_lammps.py), so skip spinning up worker processes for nothing.
+    with contextlib.nullcontext(None) if gpu_devices else ProcessPoolExecutor(max_workers=args.workers) as pool:
         for condition in sorted(conditions):
             v_th_cm_s = common.thermal_velocity_cm_s(condition)
             cond_filtered = [p for p in filtered if p.condition == condition]
@@ -157,6 +161,7 @@ def main() -> None:
                     pool, condition, fit_points, args.bmax_min, args.bmax_max, args.method,
                     args.resolution, args.vres, args.max_nfev,
                     progress=not args.quiet, heartbeat_seconds=args.heartbeat_seconds,
+                    gpu_devices=gpu_devices,
                 )
                 summary["regime"] = regime
                 summary["thermal_velocity_cm_s"] = v_th_cm_s

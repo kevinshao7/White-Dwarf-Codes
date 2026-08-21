@@ -3,7 +3,11 @@
 Fits the single free parameter of the finite-launch model,
 `b_max/a_H = rhomax_fraction`, per condition, against LAMMPS (and DAIS, for
 conditions 0 and 2) molecular-dynamics drag simulations. Launch radius `r_i`
-is held fixed at the hydrogen interparticle spacing `a_H`.
+moves with the fit: `r_i = rhomax_fraction * a_H` (`a_H` the hydrogen
+interparticle spacing), and `b_max` is always forced equal to `r_i`
+(`FiniteLaunchDrag.launch_pmax`, `theory/finite/finite_launch.py`), so the
+two are tied together rather than `b_max` being an independently bounded
+fraction of a fixed `r_i`.
 
 Depends only on `theory/finite/`, `theory/dragbase2.py`, and
 `theory/dataprocessing/output{,_dais}/results.npy` -- nothing under
@@ -13,13 +17,18 @@ deliberate simplifications (see the module docstring in
 `fit_bmax_to_lammps.py` for the reasoning):
 
 1. **Single parameter, not two.** The old model had a separate
-   `cutoff_radius_factor` (launch radius, `r_i = 50 a_H`) and impact-parameter
-   cutoff; here `r_i = a_H` is fixed, so `b_max/a_H` is bounded to `(0, 1]`
-   rather than `(0, 50]`. A fit that lands on the `1.0` boundary means the
-   model's LAMMPS-implied cutoff wants to exceed the launch radius itself --
-   that is a real finding about the model, not a fit failure, and the script
-   prints a warning rather than silently reporting the boundary value as a
-   converged answer.
+   `cutoff_radius_factor` (launch radius, `r_i = 50 a_H`) and independently
+   bounded impact-parameter cutoff; here `b_max` is always forced equal to
+   `r_i` (a tangent launch), so the one remaining free parameter,
+   `rhomax_fraction = r_i/a_H = b_max/a_H`, has no `<= 1` ceiling to enforce
+   -- growing it just moves the whole launch sphere (and its tangent
+   `b_max`) outward. The fit's `--bmax-max` therefore defaults to infinity. A
+   fit that still runs away unbounded means even an arbitrarily distant
+   launch sphere can't reach that condition's LAMMPS drag (the Yukawa
+   screening makes the drag saturate as `r_i -> infinity`, so this is a real
+   finding about the model, not a fit failure) -- the script prints a
+   warning rather than silently reporting a huge value as a converged
+   answer.
 2. **Simplified point selection.** Points are ranked by velocity, split into
    `--points-per-condition` quantile groups, and the lowest-relative-sigma
    point is kept per group. The old script's per-campaign regex grouping and
@@ -48,6 +57,24 @@ if nothing has completed recently -- with a slower `--method` or higher
 `--resolution`, a single iteration can otherwise run silently for a long
 time before the old one-line-per-iteration summary printed at all.
 
+## GPU dispatch (`--gpu-devices`)
+
+`--gpu-devices 0,1` batches every point evaluation for a trial `b_max` (one
+`least_squares` iteration's worth, or the final/`+-1 sigma` passes) through
+`FiniteLaunchDrag.drag_batch(xp=cupy)` (`theory/finite/finite_launch.py`) on
+those CUDA devices instead of submitting one CPU task per point to
+`--workers`; see `run_fit_points_gpu`'s docstring for how points are split
+across devices. Requires `cupy`; the CPU path (the default, no `--gpu-devices`)
+needs nothing beyond `numpy`/`scipy`.
+
+**Verify before trusting fitted results from `--gpu-devices`:** `drag_batch`
+was validated only on its `numpy` backend (reproduces the scalar `drag()` to
+machine precision across all four conditions and several `rhomax_fraction`
+values) in an environment with no GPU. The `cupy` code path itself has not
+been run on real hardware. Before trusting a fit produced with
+`--gpu-devices`, run the same condition/points with and without it and
+confirm `best_bmax_over_aH` agrees to several significant figures.
+
 ## Outputs
 
 - `bmax_fit_summary.csv` -- one row per condition: best-fit `b_max/a_H`,
@@ -70,14 +97,16 @@ time before the old one-line-per-iteration summary printed at all.
 
 ## Caveats
 
-- `--bmax-max` cannot exceed `1.0`; the script rejects it at startup.
+- `--bmax-max` defaults to infinity (`DEFAULT_BMAX_MAX`); `scipy.optimize.
+  least_squares` handles an unbounded upper bound directly, so no bracket
+  growth is needed here (contrast `theory/finite/bmaxfit/fit_bmax_per_point.py`,
+  whose `brentq` root-find does need a finite bracket and grows one
+  geometrically instead).
 - The default initial guess is `1.0` only when it is strictly interior to
-  `(--bmax-min, --bmax-max)`; with the default bounds `(0.01, 1.0)`, `1.0` is
-  the upper bound itself, so the geometric mean `sqrt(bmax_min * bmax_max)`
-  is used instead. Starting a gradient-based optimizer exactly on a bound can
-  pin it there before it explores the interior -- confirmed during
-  development that the geometric-mean start does explore properly.
-- If a condition's data pushes the fit to `1.0` (the `r_i` boundary), the
-  single-parameter model cannot represent that condition's LAMMPS drag;
-  letting `r_i` vary as a second fit parameter would be the next step, not
-  reflected in this script.
+  `(--bmax-min, --bmax-max)`; with the default bounds `(0.01, inf)` it is, so
+  this reduces to the plain `1.0` start.
+- If a condition's data still isn't reached at the `least_squares` optimum,
+  the model genuinely cannot represent that condition's LAMMPS drag no matter
+  how far the launch sphere moves out -- not a fit failure, but a real
+  finding about the model's physics (Yukawa screening bounds how much drag
+  is reachable even as `r_i -> infinity`).

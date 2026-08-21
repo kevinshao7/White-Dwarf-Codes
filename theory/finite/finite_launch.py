@@ -113,6 +113,7 @@ runs from ``bmin_fraction * b_max`` to ``b_max``; the remaining core
 
 from __future__ import annotations
 
+import contextlib
 import math
 import sys
 import warnings
@@ -154,10 +155,15 @@ class FiniteLaunchDrag(DragFourth):
         Inner cutoff of the log-spaced impact-parameter grid, as a fraction of
         ``b_max``.  The ``[0, b_min]`` core is added in closed form.
 
-    ``rhomax_fraction`` sets ``b_max = rhomax_fraction * r_i`` and defaults to
-    1.0, i.e. the impact parameter covers the whole launch sphere.  ``b = r_i``
-    is a tangent launch, where ``alpha = pi/2`` and ``theta -> 0`` smoothly, so
-    nothing is truncated by hand.
+    ``rhomax_fraction`` sets the launch radius itself, ``r_i = rhomax_fraction
+    * a_H`` (``a_H`` the physical hydrogen interparticle spacing fixed by
+    ``conditions``), and defaults to 1.0.  ``b_max`` is always forced equal to
+    ``r_i`` -- see :meth:`launch_pmax` -- so the two move together by
+    construction rather than ``b_max`` being an independently tunable fraction
+    of a fixed ``r_i``.  ``b = r_i`` is a tangent launch, where ``alpha = pi/2``
+    and ``theta -> 0`` smoothly, so nothing is truncated by hand, and there is
+    no ``b_max <= r_i`` ceiling to enforce: growing ``rhomax_fraction`` simply
+    moves the whole launch sphere (and its tangent ``b_max``) outward.
 
     ``ures`` is accepted for call-signature compatibility and is unused: the
     substitution above removed the integral it used to resolve.
@@ -193,10 +199,13 @@ class FiniteLaunchDrag(DragFourth):
         )
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-        if rhomax_fraction > 1.0:
-            raise ValueError(
-                "rhomax_fraction must not exceed 1: b > r_i has no launch geometry"
-            )
+        # r_i = rhomax_fraction * a_H: DragFourth.__init__ above set self.ustart
+        # (= 1/r_i) from the fixed physical a_H alone, so rescale it here to
+        # move the launch radius itself. E0Y = U(r_i) depends on r_i, so it is
+        # recomputed too. rhomax_fraction == 1.0 (the default) leaves both
+        # exactly as DragFourth set them -- a no-op.
+        self.ustart = self.ustart / rhomax_fraction
+        self.E0Y = self.A * np.exp(-self.k0 / self.ustart) * self.ustart
         if not 0.0 < bmin_fraction < 1.0:
             raise ValueError("bmin_fraction must lie in (0, 1)")
         self.method = method
@@ -214,8 +223,10 @@ class FiniteLaunchDrag(DragFourth):
         return 1.0 / self.ustart
 
     def launch_pmax(self) -> float:
-        """Impact-parameter ceiling ``b_max = rhomax_fraction * r_i``."""
-        return self.rhomax_fraction * self.launch_radius()
+        """Impact-parameter ceiling ``b_max``, always equal to ``r_i``
+        (tangent launch) -- ``rhomax_fraction`` moves ``r_i`` (and so
+        ``b_max`` with it) rather than scaling ``b_max`` independently."""
+        return self.launch_radius()
 
     def launch_energy(self, speed: float) -> float:
         """``E = 1/2 mu v_i^2 + U(r_i)``, the conserved two-body energy."""
@@ -507,6 +518,166 @@ class FiniteLaunchDrag(DragFourth):
                 negative = norm * math.exp(-self.mu * (-speed - vb) ** 2 / (2.0 * self.kb * self.T))
             total += self._drag_speed_integrand(float(speed), positive - negative)
         return 2.0 * math.pi * self.nh * self.mu * total * ds
+
+    # ------------------------------------------------------------------
+    # batched drag (numpy/cupy) -- independent of the scalar path above
+    # ------------------------------------------------------------------
+    # These four methods are a self-contained, array-module-generic
+    # ("xp") reimplementation of drag()/impact_parameter_integral()/
+    # orbit_angle()/closest_approach_u_array() for computing many
+    # independent bulk speeds -- and, internally, the vres speed sub-grid
+    # -- in one batch of array ops instead of one Python-level drag() call
+    # per speed. They duplicate rather than generalise the methods above
+    # on purpose: those are validated and used everywhere else in this
+    # repo, and are left untouched so this GPU-facing addition cannot
+    # regress them. Pass xp=cupy to run on a CUDA device; xp=None (the
+    # default) uses numpy. Only "vectorized" has a batched counterpart --
+    # quad_quad's adaptive quadrature is inherently scalar-per-call.
+    #
+    # Verified on the numpy backend: drag_batch(vb_array) reproduces
+    # drag(v) for each v in vb_array to machine precision, across all four
+    # conditions and several rhomax_fraction values (see the module's
+    # __main__ block / theory/finite's test invocation). The cupy backend
+    # has NOT been exercised on actual GPU hardware -- there is none in
+    # this environment -- so correctness and any speedup there still need
+    # confirming on a real CUDA device before trusting fitted results
+    # produced with it.
+    @staticmethod
+    def _quiet(xp):
+        """Suppress overflow/divide warnings around the Yukawa exponential,
+        matching yukawa_u's np.errstate wrapper. cupy has no errstate
+        context manager; overflow there silently yields inf, same as
+        numpy would print (and ignore) a warning for -- no-op instead."""
+        if xp is np:
+            return np.errstate(over="ignore", divide="ignore")
+        return contextlib.nullcontext()
+
+    def _radial_g_xp(self, u, rho, energy, xp):
+        with self._quiet(xp):
+            yukawa = self.A * u * xp.exp(-self.k0 / u)
+        return 1.0 - yukawa / energy - xp.square(rho * u)
+
+    def _closest_approach_u_xp(self, rho, energy, xp, iterations: int = 100):
+        """xp-generic counterpart of closest_approach_u_array; rho/energy
+        need only broadcast against each other, at any rank."""
+        lower = xp.full(rho.shape, self.ustart, dtype=xp.float64)
+        no_penetration = self._radial_g_xp(lower, rho, energy, xp) <= 0.0
+        upper = 2.0 * lower
+        for _ in range(400):
+            needs_growth = self._radial_g_xp(upper, rho, energy, xp) >= 0.0
+            if not xp.any(needs_growth):
+                break
+            upper = xp.where(needs_growth, upper * 2.0, upper)
+        else:
+            raise FloatingPointError("closest approach: failed to bracket the root")
+        for _ in range(iterations):
+            middle = 0.5 * (lower + upper)
+            positive = self._radial_g_xp(middle, rho, energy, xp) > 0.0
+            lower = xp.where(positive, middle, lower)
+            upper = xp.where(positive, upper, middle)
+        return xp.where(no_penetration, self.ustart, 0.5 * (lower + upper))
+
+    def _divided_difference_xp(self, u, u0, width_scale, xp):
+        gap = u0 - u
+        near = gap <= _DIVIDED_DIFFERENCE_FLOOR * width_scale
+        safe_gap = xp.where(near, 1.0, gap)
+        with self._quiet(xp):
+            difference = (self.A * u0 * xp.exp(-self.k0 / u0) - self.A * u * xp.exp(-self.k0 / u)) / safe_gap
+        middle = xp.where(near, 0.5 * (u + u0), u0)
+        with self._quiet(xp):
+            derivative = self.A * xp.exp(-self.k0 / middle) * (1.0 + self.k0 / middle)
+        return xp.where(near, derivative, difference)
+
+    def _scattering_angle_batch(self, b, rho, energy, xp):
+        """xp-generic counterpart of scattering_angle. ``rho``/``energy``
+        must already broadcast against each other; ``b`` need only
+        broadcast against the result (it is only used for launch_alpha)."""
+        u0 = self._closest_approach_u_xp(rho, energy, xp)
+        orbit_width = u0 - self.ustart
+        nodes = (xp.arange(self.dphires, dtype=xp.float64) + 0.5) / self.dphires
+        u0_col, width_col = u0[..., None], orbit_width[..., None]
+        rho_col, energy_col = rho[..., None], energy[..., None]
+        u = u0_col - width_col * xp.square(nodes)
+        q = (
+            self._divided_difference_xp(u, u0_col, width_col, xp) / energy_col
+            + xp.square(rho_col) * (u0_col + u)
+        )
+        integral = (1.0 / xp.sqrt(q)).mean(axis=-1)
+        delta_phi = xp.where(
+            orbit_width > 0.0, 4.0 * rho * xp.sqrt(xp.maximum(orbit_width, 0.0)) * integral, 0.0
+        )
+        alpha = xp.arcsin(xp.clip(b * self.ustart, 0.0, 1.0))
+        return math.pi - delta_phi - 2.0 * alpha
+
+    def _impact_parameter_integral_batch(self, speeds, energy, bmax: float, bmin: float, xp):
+        """xp-generic counterpart of impact_parameter_integral. ``speeds``/
+        ``energy`` are ``(n_points, vres)``; returns the same shape, one
+        integral per (point, speed-node)."""
+        v_inf = xp.sqrt(2.0 * energy / self.mu)
+
+        span = math.log(bmax) - math.log(bmin)
+        dy = span / self.rhores
+        y = math.log(bmin) + (xp.arange(self.rhores, dtype=xp.float64) + 0.5) * dy
+        b, db = xp.exp(y), xp.exp(y) * dy
+
+        rho_grid = b[None, None, :] * xp.abs(speeds)[:, :, None] / v_inf[:, :, None]
+        theta_grid = self._scattering_angle_batch(b[None, None, :], rho_grid, energy[:, :, None], xp)
+        factor_grid = 1.0 - xp.cos(theta_grid)
+        factor_grid = xp.where(xp.isfinite(factor_grid), factor_grid, 0.0)
+        grid_integral = xp.sum(b[None, None, :] * db[None, None, :] * factor_grid, axis=-1)
+
+        rho_core = bmin * xp.abs(speeds) / v_inf
+        theta_core = self._scattering_angle_batch(bmin, rho_core, energy, xp)
+        core_integral = 0.5 * (1.0 - xp.cos(theta_core)) * bmin**2
+
+        return grid_integral + core_integral
+
+    def drag_batch(self, vb, xp=None):
+        """Batched counterpart of :meth:`drag`: ``vb`` is an array of bulk
+        speeds (one per independent task), returned as an array of drag
+        forces in newtons -- ``drag_batch(vb)[i] == drag(vb[i])`` to
+        machine precision on the numpy backend. See the class-level note
+        above this method group for the cupy caveat."""
+        if self.method != "vectorized":
+            raise ValueError("drag_batch only supports method='vectorized'")
+        if xp is None:
+            xp = np
+        vb = xp.atleast_1d(xp.asarray(vb, dtype=xp.float64))
+        n_points = vb.shape[0]
+        if self.vres < 1:
+            return xp.zeros(n_points, dtype=xp.float64)
+
+        sigma_v = math.sqrt(self.kb * self.T / self.mu)
+        half_width = self.vrel_sigma_width * sigma_v
+        vmin, vmax = vb - half_width, vb + half_width
+        crosses_zero = (vmin <= 0.0) & (0.0 <= vmax)
+        speed_min = xp.where(crosses_zero, 0.0, xp.minimum(xp.abs(vmin), xp.abs(vmax)))
+        speed_max = xp.maximum(xp.abs(vmin), xp.abs(vmax))
+        point_valid = speed_max > speed_min
+
+        ds = (speed_max - speed_min) / self.vres
+        j = xp.arange(self.vres, dtype=xp.float64) + 0.5
+        speeds = speed_min[:, None] + j[None, :] * ds[:, None]
+
+        norm = math.sqrt(self.mu / (2.0 * math.pi * self.kb * self.T))
+        two_kT = 2.0 * self.kb * self.T
+        pos_mask = (vmin[:, None] <= speeds) & (speeds <= vmax[:, None])
+        neg_speeds = -speeds
+        neg_mask = (vmin[:, None] <= neg_speeds) & (neg_speeds <= vmax[:, None])
+        positive = xp.where(pos_mask, norm * xp.exp(-self.mu * xp.square(speeds - vb[:, None]) / two_kT), 0.0)
+        negative = xp.where(neg_mask, norm * xp.exp(-self.mu * xp.square(neg_speeds - vb[:, None]) / two_kT), 0.0)
+        weight = positive - negative
+
+        energy = 0.5 * self.mu * xp.square(speeds) + self.E0Y
+
+        bmax, bmin = self.launch_pmax(), self.launch_pmin()
+        if bmax <= 0.0 or bmin <= 0.0:
+            return xp.zeros(n_points, dtype=xp.float64)
+
+        b_integral = self._impact_parameter_integral_batch(speeds, energy, bmax, bmin, xp)
+        integrand = xp.where(point_valid[:, None] & (speeds > 0.0), xp.square(speeds) * weight * b_integral, 0.0)
+        total = xp.sum(integrand, axis=-1)
+        return xp.where(point_valid, 2.0 * math.pi * self.nh * self.mu * total * ds, 0.0)
 
 
 if __name__ == "__main__":
