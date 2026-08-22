@@ -250,35 +250,6 @@ def make_drag_for_fit(condition: int, bmax_over_aH: float, method: str, resoluti
     )
 
 
-def evaluate_model_curve(
-    condition: int,
-    bmax_over_aH: float,
-    method: str,
-    resolution: int,
-    vres: int,
-    velocities_cm_s: np.ndarray,
-) -> np.ndarray:
-    """Model |acceleration| [cm/s^2] at one trial ``bmax_over_aH``, evaluated
-    at every velocity in ``velocities_cm_s`` -- used for the smooth final-fit
-    curve, independent of the (typically much sparser) points the
-    least-squares residuals were computed from.
-
-    CPU-only (``method="vectorized"`` batches via ``drag_batch``;
-    ``"quad_quad"`` falls back to one scalar ``drag()`` call per velocity):
-    this runs once per condition after the fit has already converged, so it
-    is cheap regardless of ``--gpu-devices``.
-    """
-    drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
-    velocities_m_s = np.asarray(velocities_cm_s, dtype=np.float64) * CM_PER_S_TO_M_PER_S
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        if method == "vectorized":
-            forces_n = np.asarray(drag.drag_batch(velocities_m_s), dtype=np.float64)
-        else:
-            forces_n = np.array([drag.drag(float(v)) for v in velocities_m_s], dtype=np.float64)
-    return np.abs(forces_n / drag.ms) * 100.0
-
-
 def parse_gpu_devices(raw: str | None) -> list[int] | None:
     """Parse ``--gpu-devices`` (e.g. ``"0,1"``) into a device-id list.
 
@@ -516,26 +487,51 @@ def fit_condition(
     # denser than, but not extrapolated beyond, the sparse points the
     # least-squares residuals were computed from. The +/-1 sigma band is
     # evaluated on the same velocity grid so it lines up with the curve.
+    #
+    # Routed through `evaluate_points` (one drag() call per point, dispatched
+    # across the CPU pool) rather than FiniteLaunchDrag.drag_batch -- an
+    # earlier version called drag_batch directly with all smooth_curve_points
+    # velocities batched at once, which allocates arrays shaped (n_points,
+    # vres, rhores, dphires); at the defaults here (vres=101, rhores=dphires=
+    # 360) and n_points=200 that's ~2.6e9 elements (~21GB) per array, several
+    # of which are live at once inside FiniteLaunchDrag's internals -- enough
+    # to hang and OOM a machine. Never call drag_batch with a point count
+    # that large without chunking.
     fit_velocities_cm_s = np.array([point.velocity_cm_s for point in points], dtype=np.float64)
     smooth_velocities_cm_s = np.logspace(
         math.log10(float(fit_velocities_cm_s.min())),
         math.log10(float(fit_velocities_cm_s.max())),
         smooth_curve_points,
     )
+    smooth_points = [
+        DataPoint(
+            condition=condition,
+            velocity_cm_s=float(velocity_cm_s),
+            acceleration_cm_s2=math.nan,
+            velocity_sigma_cm_s=math.nan,
+            acceleration_sigma_cm_s2=math.nan,
+            campaign_id=-1,
+            source="smooth_curve",
+        )
+        for velocity_cm_s in smooth_velocities_cm_s
+    ]
+
+    def model_curve_accelerations(bmax_over_aH: float, label: str) -> np.ndarray:
+        rows = evaluate_points(bmax_over_aH, smooth_points, label)
+        return np.array([row["model_acceleration_cm_s2"] for row in rows], dtype=np.float64)
+
     smooth_curve: dict[str, np.ndarray] = {
         "velocity_cm_s": smooth_velocities_cm_s,
-        "model_acceleration_cm_s2": evaluate_model_curve(
-            condition, best_bmax_over_aH, method, resolution, vres, smooth_velocities_cm_s
-        ),
+        "model_acceleration_cm_s2": model_curve_accelerations(best_bmax_over_aH, f"cond{condition} smooth curve"),
     }
     if np.isfinite(sigma) and sigma > 0:
         bmax_low = max(bmax_min, best_bmax_over_aH - sigma)
         bmax_high = min(bmax_max, best_bmax_over_aH + sigma)
-        smooth_curve["low_acceleration_cm_s2"] = evaluate_model_curve(
-            condition, bmax_low, method, resolution, vres, smooth_velocities_cm_s
+        smooth_curve["low_acceleration_cm_s2"] = model_curve_accelerations(
+            bmax_low, f"cond{condition} smooth -1sigma"
         )
-        smooth_curve["high_acceleration_cm_s2"] = evaluate_model_curve(
-            condition, bmax_high, method, resolution, vres, smooth_velocities_cm_s
+        smooth_curve["high_acceleration_cm_s2"] = model_curve_accelerations(
+            bmax_high, f"cond{condition} smooth +1sigma"
         )
 
     return summary, prediction_rows, smooth_curve
