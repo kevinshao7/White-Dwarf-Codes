@@ -45,9 +45,10 @@ quad-based version of this script.
   velocity)`: `vres`/`rhores`/`dphires` actually used, the drag force, and the
   relative error vs. that scan's finest tested resolution.
 - `condition_0_drag_vs_velocity.png` -- drag force (N) vs. bulk velocity
-  (cm/s), log-log. Colour encodes resolution (light -> dark as resolution
-  increases); linestyle encodes scan type (solid = `vres`, dotted = `rhores`,
-  dashed = `dphires`).
+  (cm/s), log-log. Colour encodes scan type (blue = `vres`, orange =
+  `rhores`, purple = `dphires`); linestyle encodes resolution (dotted ->
+  dashed -> dashdot -> solid as resolution increases, so the finest tested
+  resolution in each scan is always the solid line).
 - `condition_0_relative_error_vs_velocity.png` -- same colour/linestyle
   scheme, relative error (log scale) vs. the same velocity axis. The
   reference resolution for each scan is omitted (its error is identically

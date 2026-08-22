@@ -172,10 +172,10 @@ class FiniteLaunchDrag(DragFourth):
     def __init__(
         self,
         conditions,
-        vres: int = 201,
-        rhores: int = 180,
+        vres: int = 30,
+        rhores: int = 100,
         ures: int = 180,
-        dphires: int = 180,
+        dphires: int = 1000,
         vrel_sigma_width: float = 4.0,
         rhomax_fraction: float = 1.0,
         dphi_endpoint_fraction: float = 1.0e-5,

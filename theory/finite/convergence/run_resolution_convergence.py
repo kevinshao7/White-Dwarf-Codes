@@ -26,11 +26,12 @@ Two plots are produced:
      ``--resolutions``, already computed as part of the sweep) -- there is no
      separate quad-based ground truth.
 
-Each plot has up to 3 scans x len(resolutions) lines. Colour encodes
-resolution (light -> dark as resolution increases), linestyle encodes which
-parameter is being swept (solid = vres, dotted = rhores, dashed = dphires),
-so both the per-scan convergence trend and the three scans are visible at a
-glance.
+Each plot has up to 3 scans x len(resolutions) lines. Colour encodes which
+parameter is being swept (blue = vres, orange = rhores, purple = dphires);
+linestyle encodes resolution (dotted -> dashed -> dashdot -> solid as
+resolution increases, so the finest tested resolution in each scan is always
+the solid line), so both the per-scan convergence trend and the three scans
+are visible at a glance.
 """
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ SCAN_LABELS = {
     "rhores": "impact-parameter resolution (rhores)",
     "dphires": "scattering-angle resolution (dphires)",
 }
-SCAN_LINESTYLES = {"vres": "-", "rhores": ":", "dphires": "--"}
+SCAN_COLORS = {"vres": "tab:blue", "rhores": "tab:orange", "dphires": "tab:purple"}
+# Cycle read finest-last so the finest tested resolution in a scan is always solid.
+_LINESTYLE_CYCLE = ("dotted", "dashed", "dashdot", "solid")
 
 DEFAULT_RESOLUTIONS = (30, 100, 300, 1000)
 DEFAULT_N_VELOCITIES = 16
@@ -123,23 +126,21 @@ def add_relative_error(rows: list[dict[str, object]], hold_resolution: int) -> N
         row["relative_error"] = abs(row["force_n"] - ref) / abs(ref) if ref != 0.0 else float("nan")
 
 
-def _resolution_colors(resolutions: tuple[int, ...]):
-    import matplotlib.pyplot as plt
-
+def _resolution_linestyles(resolutions: tuple[int, ...]) -> dict[int, str]:
     resolutions_sorted = sorted(resolutions)
-    cmap = plt.get_cmap("viridis")
-    n_res = len(resolutions_sorted)
-    return {
-        res: cmap(i / (n_res - 1) if n_res > 1 else 0.5)
-        for i, res in enumerate(resolutions_sorted)
-    }
+    n = len(resolutions_sorted)
+    if n <= len(_LINESTYLE_CYCLE):
+        chosen = _LINESTYLE_CYCLE[-n:] if n > 0 else ()
+    else:
+        chosen = [_LINESTYLE_CYCLE[i % len(_LINESTYLE_CYCLE)] for i in range(n)]
+    return dict(zip(resolutions_sorted, chosen))
 
 
 def make_drag_force_plot(rows: list[dict[str, object]], resolutions: tuple[int, ...], condition_label: str) -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5))
-    colors = _resolution_colors(resolutions)
+    linestyles = _resolution_linestyles(resolutions)
 
     for scan_type in SCAN_TYPES:
         for res in sorted(resolutions):
@@ -153,8 +154,8 @@ def make_drag_force_plot(rows: list[dict[str, object]], resolutions: tuple[int, 
             ax.plot(
                 v[valid],
                 f[valid],
-                color=colors[res],
-                linestyle=SCAN_LINESTYLES[scan_type],
+                color=SCAN_COLORS[scan_type],
+                linestyle=linestyles[res],
                 linewidth=1.8,
                 label=f"{SCAN_LABELS[scan_type]}, n={res}",
             )
@@ -177,7 +178,7 @@ def make_relative_error_plot(
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5))
-    colors = _resolution_colors(resolutions)
+    linestyles = _resolution_linestyles(resolutions)
 
     for scan_type in SCAN_TYPES:
         for res in sorted(resolutions):
@@ -195,8 +196,8 @@ def make_relative_error_plot(
             ax.plot(
                 v[valid],
                 err[valid],
-                color=colors[res],
-                linestyle=SCAN_LINESTYLES[scan_type],
+                color=SCAN_COLORS[scan_type],
+                linestyle=linestyles[res],
                 linewidth=1.8,
                 label=f"{SCAN_LABELS[scan_type]}, n={res}",
             )
