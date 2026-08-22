@@ -562,10 +562,20 @@ def plot_fit_diagnostic(
     end = result.end_index_exclusive
     status_color = {"ok": "#2e7d32", "review": "#ed6c02", "failed": "#c62828"}[result.status]
 
+    plt.rcParams.update(
+        {
+            "font.size": 11,
+            "axes.titlesize": 13,
+            "axes.labelsize": 12,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+        }
+    )
+
     fig, (ax, residual_ax) = plt.subplots(
         2,
         1,
-        figsize=(10, 7.5),
+        figsize=(11, 7.5),
         sharex=True,
         gridspec_kw={"height_ratios": [3, 1]},
     )
@@ -619,36 +629,18 @@ def plot_fit_diagnostic(
     else:
         residual_ax.text(0.5, 0.5, "No valid exponential fit", transform=residual_ax.transAxes, ha="center", va="center")
 
-    flags = result.quality_flags or "none"
-    summary = (
-        f"status={result.status}  A={result.amplitude:.4g} cm/s  τ={result.tau:.4g} s  "
-        f"τ uncertainty={result.tau_sigma:.3g} s\n"
-        f"R²={result.r_squared:.3g}  reduced χ²={result.reduced_chi2:.3g}  "
-        f"window score={result.window_selection_score:.3g}  candidates={result.candidate_window_count}\n"
-        f"lag-1 residual correlation={result.residual_lag1_correlation:.3g}\nflags: {flags}"
-    )
     ax.set_title(
-        f"Condition {result.condition}, nominal velocity {result.nominal_velocity_cm_s:.3g} cm/s\n"
-        f"{result.source_file}",
+        f"Condition {result.condition}, nominal velocity {result.nominal_velocity_cm_s:.3g} cm/s",
         color=status_color,
-    )
-    ax.text(
-        0.01,
-        0.02,
-        summary,
-        transform=ax.transAxes,
-        fontsize=8.5,
-        va="bottom",
-        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": status_color},
     )
     ax.set_ylabel("projected velocity (cm/s)")
     ax.grid(alpha=0.25)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9, frameon=False, borderaxespad=0.0)
     residual_ax.set_xlabel(f"time / 10$^{{{exponent}}}$ s")
     residual_ax.set_ylabel("residual / SEM")
     residual_ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(path, dpi=160)
+    fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
