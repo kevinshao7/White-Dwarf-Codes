@@ -92,9 +92,11 @@ DEFAULT_POINTS_PER_CONDITION = 8
 DEFAULT_RESOLUTION = 360
 DEFAULT_VRES = 101
 # Number of velocities the final best-fit model curve (and its +/-1 sigma
-# band) is evaluated at for plotting -- independent of how many points were
-# actually used in the least-squares fit itself.
-DEFAULT_SMOOTH_CURVE_POINTS = 40
+# band) is evaluated at for plotting, log-spaced across the actual fit
+# points' own velocity range for that condition -- denser than, but not
+# extrapolated beyond, the (typically much sparser) points the fit itself
+# used.
+DEFAULT_SMOOTH_CURVE_POINTS = 200
 
 
 @dataclass(frozen=True)
@@ -419,8 +421,6 @@ def fit_condition(
     max_nfev: int,
     progress: bool,
     heartbeat_seconds: float,
-    curve_min_velocity_cm_s: float,
-    curve_max_velocity_cm_s: float,
     smooth_curve_points: int = DEFAULT_SMOOTH_CURVE_POINTS,
     gpu_devices: list[int] | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]:
@@ -511,13 +511,16 @@ def fit_condition(
     }
 
     # Smooth final-fit model curve for the overlay plot, evaluated at
-    # `smooth_curve_points` velocities spanning the condition's full plotted
-    # velocity range -- independent of (and typically much denser than) the
-    # sparse points the least-squares residuals were computed from. The
-    # +/-1 sigma band is evaluated on the same velocity grid so it lines up
-    # with the curve.
+    # `smooth_curve_points` velocities spanning only the range of the actual
+    # fit points (not the broader --min/--max-velocity-cm-s filter range) --
+    # denser than, but not extrapolated beyond, the sparse points the
+    # least-squares residuals were computed from. The +/-1 sigma band is
+    # evaluated on the same velocity grid so it lines up with the curve.
+    fit_velocities_cm_s = np.array([point.velocity_cm_s for point in points], dtype=np.float64)
     smooth_velocities_cm_s = np.logspace(
-        math.log10(curve_min_velocity_cm_s), math.log10(curve_max_velocity_cm_s), smooth_curve_points
+        math.log10(float(fit_velocities_cm_s.min())),
+        math.log10(float(fit_velocities_cm_s.max())),
+        smooth_curve_points,
     )
     smooth_curve: dict[str, np.ndarray] = {
         "velocity_cm_s": smooth_velocities_cm_s,
@@ -648,8 +651,9 @@ def main() -> None:
         "--smooth-curve-points",
         type=int,
         default=DEFAULT_SMOOTH_CURVE_POINTS,
-        help="Velocities the final best-fit model curve (and its +/-1 sigma band) is evaluated at, spanning "
-        "[--min-velocity-cm-s, --max-velocity-cm-s], independent of the number of points fit.",
+        help="Velocities the final best-fit model curve (and its +/-1 sigma band) is evaluated at, "
+        "log-spaced across that condition's own fit-point velocity range, independent of the number "
+        "of points fit.",
     )
     parser.add_argument("--max-nfev", type=int, default=30)
     parser.add_argument("--workers", type=int, default=8)
@@ -715,8 +719,6 @@ def main() -> None:
                 args.max_nfev,
                 progress=not args.quiet,
                 heartbeat_seconds=args.heartbeat_seconds,
-                curve_min_velocity_cm_s=args.min_velocity_cm_s,
-                curve_max_velocity_cm_s=args.max_velocity_cm_s,
                 smooth_curve_points=args.smooth_curve_points,
                 gpu_devices=gpu_devices,
             )
