@@ -13,12 +13,12 @@ cutoff to tie to `b_max`: the deflection is integrated exactly from launch to
 closest approach, so `b_max` alone bounds both integrals by construction.
 `FiniteLaunchDrag.launch_pmax` forces `b_max == r_i` always (a tangent
 launch), so `rhomax_fraction` moves both together rather than being bounded
-above by a separately-fixed `r_i` -- the fit's upper bound defaults to
-infinity (`DEFAULT_BMAX_MAX`); a best fit that still runs away unbounded is a
-sign that even an arbitrarily distant launch sphere cannot reach the data
-(the model saturates as `r_i -> infinity`, since the Yukawa screening kills
-the contribution from very large impact parameters), not a bug -- report it,
-don't hide it.
+above by a separately-fixed `r_i` -- the fit's upper bound is fixed at
+infinity (`DEFAULT_BMAX_MAX`, not CLI-overridable); a best fit that still
+runs away unbounded is a sign that even an arbitrarily distant launch sphere
+cannot reach the data (the model saturates as `r_i -> infinity`, since the
+Yukawa screening kills the contribution from very large impact parameters),
+not a bug -- report it, don't hide it.
 
 Point selection is likewise simplified from the old script's per-campaign
 regex grouping: points are ranked by velocity, split into
@@ -74,8 +74,11 @@ WEAKLY_COUPLED_CONDITIONS = (0, 2)
 DEFAULT_BMAX_MIN = 1.0e-2
 # b_max is tied to r_i (FiniteLaunchDrag.launch_pmax: b_max == r_i always), so
 # there is no b_max/a_H <= 1 ceiling to enforce -- fitting rhomax_fraction
-# unbounded above just moves the whole launch sphere outward.
+# unbounded above just moves the whole launch sphere outward. Fixed (not
+# CLI-overridable): there is no --bmax-max flag, so every fit always uses
+# this upper bound.
 DEFAULT_BMAX_MAX = math.inf
+CONDITION_SUBPLOT_POSITION = {0: (0, 0), 1: (0, 1), 2: (1, 0), 3: (1, 1)}
 DEFAULT_POINTS_PER_CONDITION = 8
 # rhores = dphires = 360 keeps the 'vectorized' scheme within ~9e-4 relative
 # error of the quad_quad reference (worst case 8.7e-4) across the conditions
@@ -88,6 +91,10 @@ DEFAULT_POINTS_PER_CONDITION = 8
 # you change conditions, velocity range, or need tighter accuracy.
 DEFAULT_RESOLUTION = 360
 DEFAULT_VRES = 101
+# Number of velocities the final best-fit model curve (and its +/-1 sigma
+# band) is evaluated at for plotting -- independent of how many points were
+# actually used in the least-squares fit itself.
+DEFAULT_SMOOTH_CURVE_POINTS = 40
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,35 @@ def make_drag_for_fit(condition: int, bmax_over_aH: float, method: str, resoluti
     )
 
 
+def evaluate_model_curve(
+    condition: int,
+    bmax_over_aH: float,
+    method: str,
+    resolution: int,
+    vres: int,
+    velocities_cm_s: np.ndarray,
+) -> np.ndarray:
+    """Model |acceleration| [cm/s^2] at one trial ``bmax_over_aH``, evaluated
+    at every velocity in ``velocities_cm_s`` -- used for the smooth final-fit
+    curve, independent of the (typically much sparser) points the
+    least-squares residuals were computed from.
+
+    CPU-only (``method="vectorized"`` batches via ``drag_batch``;
+    ``"quad_quad"`` falls back to one scalar ``drag()`` call per velocity):
+    this runs once per condition after the fit has already converged, so it
+    is cheap regardless of ``--gpu-devices``.
+    """
+    drag = make_drag_for_fit(condition, bmax_over_aH, method, resolution, vres)
+    velocities_m_s = np.asarray(velocities_cm_s, dtype=np.float64) * CM_PER_S_TO_M_PER_S
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if method == "vectorized":
+            forces_n = np.asarray(drag.drag_batch(velocities_m_s), dtype=np.float64)
+        else:
+            forces_n = np.array([drag.drag(float(v)) for v in velocities_m_s], dtype=np.float64)
+    return np.abs(forces_n / drag.ms) * 100.0
+
+
 def parse_gpu_devices(raw: str | None) -> list[int] | None:
     """Parse ``--gpu-devices`` (e.g. ``"0,1"``) into a device-id list.
 
@@ -383,8 +419,11 @@ def fit_condition(
     max_nfev: int,
     progress: bool,
     heartbeat_seconds: float,
+    curve_min_velocity_cm_s: float,
+    curve_max_velocity_cm_s: float,
+    smooth_curve_points: int = DEFAULT_SMOOTH_CURVE_POINTS,
     gpu_devices: list[int] | None = None,
-) -> tuple[dict[str, object], list[dict[str, object]], dict[str, list[dict[str, object]]]]:
+) -> tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]:
     """``gpu_devices``, when given (e.g. ``[0, 1]``), evaluates every point
     batch for a trial ``bmax_over_aH`` via ``run_fit_points_gpu`` instead of
     submitting one ``run_fit_point_case`` task per point to ``pool`` -- see
@@ -471,29 +510,43 @@ def fit_condition(
         "vres": vres,
     }
 
-    # +/-1 sigma model curves for the shaded uncertainty band in the overlay
-    # plot. Only evaluated at the fit points already computed above -- cheap
-    # relative to the least_squares iterations themselves (two extra passes
-    # instead of dozens).
-    uncertainty_rows: dict[str, list[dict[str, object]]] = {"low": [], "high": []}
+    # Smooth final-fit model curve for the overlay plot, evaluated at
+    # `smooth_curve_points` velocities spanning the condition's full plotted
+    # velocity range -- independent of (and typically much denser than) the
+    # sparse points the least-squares residuals were computed from. The
+    # +/-1 sigma band is evaluated on the same velocity grid so it lines up
+    # with the curve.
+    smooth_velocities_cm_s = np.logspace(
+        math.log10(curve_min_velocity_cm_s), math.log10(curve_max_velocity_cm_s), smooth_curve_points
+    )
+    smooth_curve: dict[str, np.ndarray] = {
+        "velocity_cm_s": smooth_velocities_cm_s,
+        "model_acceleration_cm_s2": evaluate_model_curve(
+            condition, best_bmax_over_aH, method, resolution, vres, smooth_velocities_cm_s
+        ),
+    }
     if np.isfinite(sigma) and sigma > 0:
         bmax_low = max(bmax_min, best_bmax_over_aH - sigma)
         bmax_high = min(bmax_max, best_bmax_over_aH + sigma)
-        uncertainty_rows["low"] = evaluate_points(bmax_low, points, f"cond{condition} -1sigma")
-        uncertainty_rows["high"] = evaluate_points(bmax_high, points, f"cond{condition} +1sigma")
+        smooth_curve["low_acceleration_cm_s2"] = evaluate_model_curve(
+            condition, bmax_low, method, resolution, vres, smooth_velocities_cm_s
+        )
+        smooth_curve["high_acceleration_cm_s2"] = evaluate_model_curve(
+            condition, bmax_high, method, resolution, vres, smooth_velocities_cm_s
+        )
 
-    return summary, prediction_rows, uncertainty_rows
+    return summary, prediction_rows, smooth_curve
 
 
-def make_overlay_plot(
+def draw_overlay(
+    axis: plt.Axes,
     condition: int,
     summary: dict[str, object],
     prediction_rows: list[dict[str, object]],
     all_points: list[DataPoint],
-    uncertainty_rows: dict[str, list[dict[str, object]]] | None = None,
+    smooth_curve: dict[str, np.ndarray] | None = None,
 ) -> None:
-    fig, axis = plt.subplots(figsize=(8, 6))
-
+    """Draw one condition's b_max-fit overlay onto an existing axis."""
     all_v = np.array([p.velocity_cm_s for p in all_points if p.condition == condition])
     all_a = np.array([p.acceleration_cm_s2 for p in all_points if p.condition == condition])
     axis.scatter(all_v, all_a, s=8, color="lightgray", label="LAMMPS points (not fit)", zorder=1)
@@ -503,30 +556,29 @@ def make_overlay_plot(
     fit_sigma = np.array([row["data_acceleration_sigma_cm_s2"] for row in prediction_rows])
     axis.errorbar(fit_v, fit_a, yerr=fit_sigma, fmt="o", color="tab:red", markersize=6, capsize=3, label="fit points", zorder=4)
 
-    order = np.argsort(fit_v)
-    model_v = fit_v[order]
-    model_a = np.array([row["model_acceleration_cm_s2"] for row in prediction_rows])[order]
-
-    # Lightly shaded +/-1 sigma band from the fitted b_max uncertainty, drawn
-    # under the fit points/curve.
-    low_rows = uncertainty_rows.get("low") if uncertainty_rows else None
-    high_rows = uncertainty_rows.get("high") if uncertainty_rows else None
-    if low_rows and high_rows:
-        low_a = np.array([row["model_acceleration_cm_s2"] for row in low_rows])[order]
-        high_a = np.array([row["model_acceleration_cm_s2"] for row in high_rows])[order]
-        band_low = np.minimum(low_a, high_a)
-        band_high = np.maximum(low_a, high_a)
-        axis.fill_between(
-            model_v, band_low, band_high,
-            color="tab:blue", alpha=0.15, linewidth=0,
-            label=r"model $\pm1\sigma$", zorder=1.5,
-        )
-
     model_label = f"model, $b_{{max}}/a_H={summary['best_bmax_over_aH']:.4g}$"
     best_bmax_over_lD = summary.get("best_bmax_over_debye_length", math.nan)
     if condition in WEAKLY_COUPLED_CONDITIONS and np.isfinite(best_bmax_over_lD):
         model_label += f"\n$b_{{max}}/\\lambda_{{De}}={best_bmax_over_lD:.3g}$"
-    axis.plot(model_v, model_a, color="tab:blue", linewidth=2.0, marker="s", markersize=4, label=model_label, zorder=3)
+
+    if smooth_curve:
+        model_v = np.asarray(smooth_curve["velocity_cm_s"])
+        model_a = np.asarray(smooth_curve["model_acceleration_cm_s2"])
+
+        # Lightly shaded +/-1 sigma band from the fitted b_max uncertainty,
+        # drawn under the fit points/curve, on the same velocity grid.
+        low_a = smooth_curve.get("low_acceleration_cm_s2")
+        high_a = smooth_curve.get("high_acceleration_cm_s2")
+        if low_a is not None and high_a is not None:
+            band_low = np.minimum(low_a, high_a)
+            band_high = np.maximum(low_a, high_a)
+            axis.fill_between(
+                model_v, band_low, band_high,
+                color="tab:blue", alpha=0.15, linewidth=0,
+                label=r"model $\pm1\sigma$", zorder=1.5,
+            )
+
+        axis.plot(model_v, model_a, color="tab:blue", linewidth=2.0, label=model_label, zorder=3)
 
     axis.set_xscale("log")
     axis.set_yscale("log")
@@ -537,11 +589,33 @@ def make_overlay_plot(
         sigma_lD = summary.get("best_bmax_over_debye_length_sigma", math.nan)
         sigma_str = f"{sigma_lD:.2g}" if np.isfinite(sigma_lD) else "n/a"
         title += f"\n$b_{{max}}/\\lambda_{{De}}={best_bmax_over_lD:.3g}\\pm{sigma_str}$ (weakly coupled)"
-    axis.set_title(title)
+    axis.set_title(title, fontsize=10)
     axis.grid(True, which="both", alpha=0.25)
-    axis.legend(fontsize=9)
-    fig.tight_layout()
-    fig.savefig(OUTDIR / f"condition_{condition}_bmax_fit_overlay.png", dpi=200)
+    axis.legend(fontsize=8)
+
+
+def make_combined_overlay_plot(
+    results: dict[int, tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]],
+    all_points: list[DataPoint],
+) -> None:
+    """One 2x2 figure with all 4 conditions' b_max-fit overlays as subplots.
+
+    Panel position is fixed by ``CONDITION_SUBPLOT_POSITION`` regardless of
+    which conditions were actually fit, so the layout is stable across runs;
+    any condition without a fit result (e.g. ``--conditions`` restricted the
+    run, or it had no fit points) leaves its panel blank.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11))
+    for condition, (row, col) in CONDITION_SUBPLOT_POSITION.items():
+        axis = axes[row, col]
+        if condition in results:
+            summary, prediction_rows, smooth_curve = results[condition]
+            draw_overlay(axis, condition, summary, prediction_rows, all_points, smooth_curve)
+        else:
+            axis.axis("off")
+    fig.suptitle("b_max fit vs LAMMPS ($r_i=a_H$ fixed)", fontsize=14)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    fig.savefig(OUTDIR / "bmax_fit_overlay_combined.png", dpi=200)
     plt.close(fig)
 
 
@@ -567,10 +641,16 @@ def main() -> None:
     parser.add_argument("--max-relative-sigma", type=float, default=0.5)
     parser.add_argument("--points-per-condition", type=int, default=DEFAULT_POINTS_PER_CONDITION)
     parser.add_argument("--bmax-min", type=float, default=DEFAULT_BMAX_MIN)
-    parser.add_argument("--bmax-max", type=float, default=DEFAULT_BMAX_MAX)
     parser.add_argument("--method", choices=("quad_quad", "vectorized"), default="vectorized")
     parser.add_argument("--resolution", type=int, default=DEFAULT_RESOLUTION, help="rhores = dphires used for every drag evaluation during the fit")
     parser.add_argument("--vres", type=int, default=DEFAULT_VRES)
+    parser.add_argument(
+        "--smooth-curve-points",
+        type=int,
+        default=DEFAULT_SMOOTH_CURVE_POINTS,
+        help="Velocities the final best-fit model curve (and its +/-1 sigma band) is evaluated at, spanning "
+        "[--min-velocity-cm-s, --max-velocity-cm-s], independent of the number of points fit.",
+    )
     parser.add_argument("--max-nfev", type=int, default=30)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
@@ -613,6 +693,7 @@ def main() -> None:
     start = time.perf_counter()
     summaries: list[dict[str, object]] = []
     all_prediction_rows: list[dict[str, object]] = []
+    plot_results: dict[int, tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]] = {}
     # GPU dispatch never touches the CPU pool (see fit_condition/evaluate_points),
     # so skip spinning up worker processes that would just sit idle.
     with contextlib.nullcontext(None) if gpu_devices else ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -622,27 +703,23 @@ def main() -> None:
                 print(f"Condition {condition}: no fit points after selection, skipping.", flush=True)
                 continue
             print(f"Condition {condition}: fitting b_max/a_H against {len(condition_points)} points.", flush=True)
-            summary, prediction_rows, uncertainty_rows = fit_condition(
+            summary, prediction_rows, smooth_curve = fit_condition(
                 pool,
                 condition,
                 condition_points,
                 args.bmax_min,
-                args.bmax_max,
+                DEFAULT_BMAX_MAX,
                 args.method,
                 args.resolution,
                 args.vres,
                 args.max_nfev,
                 progress=not args.quiet,
                 heartbeat_seconds=args.heartbeat_seconds,
+                curve_min_velocity_cm_s=args.min_velocity_cm_s,
+                curve_max_velocity_cm_s=args.max_velocity_cm_s,
+                smooth_curve_points=args.smooth_curve_points,
                 gpu_devices=gpu_devices,
             )
-            if summary["at_upper_bound"]:
-                print(
-                    f"  WARNING: condition {condition} best fit sits at the explicit b_max/a_H upper "
-                    f"bound ({args.bmax_max:g}) passed via --bmax-max; the default bound is infinity, "
-                    f"so this only fires when that default was overridden.",
-                    flush=True,
-                )
             print(
                 f"  best b_max/a_H = {summary['best_bmax_over_aH']:.6g} +/- {summary['best_bmax_over_aH_sigma']:.3g}, "
                 f"reduced chi2 = {summary['reduced_chi2']:.4g}, converged={summary['converged']}.",
@@ -656,10 +733,11 @@ def main() -> None:
                 )
             summaries.append(summary)
             all_prediction_rows.extend(prediction_rows)
-            make_overlay_plot(condition, summary, prediction_rows, all_points, uncertainty_rows)
+            plot_results[condition] = (summary, prediction_rows, smooth_curve)
 
     write_csv(OUTDIR / "bmax_fit_summary.csv", summaries)
     write_csv(OUTDIR / "bmax_fit_predictions.csv", all_prediction_rows)
+    make_combined_overlay_plot(plot_results, all_points)
     print(f"Finished in {(time.perf_counter()-start)/60:.1f} min.", flush=True)
 
 
