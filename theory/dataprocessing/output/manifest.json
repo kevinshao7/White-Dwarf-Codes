@@ -1,9 +1,9 @@
 {
-  "created_utc": "2026-08-22T11:05:18.543354+00:00",
+  "created_utc": "2026-08-22T11:48:14.433955+00:00",
   "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
   "numpy": "2.5.0",
   "input_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\dataarchive\\nprun4_29",
-  "source": "raw",
+  "source": "intermediate",
   "output_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\theory\\dataprocessing\\output",
   "configuration": {
     "skip_rows": 21,
@@ -17,15 +17,15 @@
     "max_reduced_chi2": 100.0,
     "min_r_squared": 0.5
   },
-  "discovered_inputs": 20,
-  "processed_inputs": 20,
+  "discovered_inputs": 172,
+  "processed_inputs": 172,
   "workers": 8,
   "source_hashes": "computed",
   "raw_target_frames": 1000,
   "status_counts": {
-    "ok": 0,
-    "review": 18,
-    "ignored": 2,
+    "ok": 3,
+    "review": 60,
+    "ignored": 109,
     "failed": 0
   },
   "raw_source_audit": {
