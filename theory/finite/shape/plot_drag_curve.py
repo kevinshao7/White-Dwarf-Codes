@@ -17,6 +17,11 @@ Uses ``method="vectorized"`` at the class default resolution (vres=30,
 rhores=100, dphires=1000) -- the production candidate documented in
 ``finite_launch.py`` -- and ``drag_batch`` to evaluate all velocities for a
 condition in one vectorised call.
+
+For conditions 0 and 2, a power-law ``F ~ v^n`` is fit (least squares in
+log-log space) to the first 10 and last 10 velocity points independently,
+and each fit is drawn as a dashed segment spanning only the x-range of the
+points it was fit to, labelled with its exponent ``n``.
 """
 
 from __future__ import annotations
@@ -43,9 +48,22 @@ VELOCITY_MIN_CM_S = 1.0e4
 VELOCITY_MAX_CM_S = 1.0e8
 CM_PER_M = 100.0
 
+POWER_LAW_FIT_CONDITIONS = (0, 2)
+POWER_LAW_FIT_N_POINTS = 10
+POWER_LAW_FIT_SPECS = (
+    ("low-v fit", slice(0, POWER_LAW_FIT_N_POINTS), "tab:green"),
+    ("high-v fit", slice(-POWER_LAW_FIT_N_POINTS, None), "tab:red"),
+)
+
 
 def condition_label(drag: FiniteLaunchDrag) -> str:
     return f"Condition {drag.condition_index}: T={drag.T:.0e} K, rho={drag.gcc:.0e} g/cm^3"
+
+
+def fit_power_law(velocities: np.ndarray, forces: np.ndarray) -> tuple[float, float]:
+    """Least-squares ``F = coeff * v^slope`` fit in log-log space."""
+    slope, log_coeff = np.polyfit(np.log(velocities), np.log(forces), 1)
+    return float(slope), float(math.exp(log_coeff))
 
 
 def main() -> None:
@@ -65,7 +83,24 @@ def main() -> None:
         thermal_speed_cm_s = thermal_speed_m_s * CM_PER_M
 
         valid = np.isfinite(forces_n) & (forces_n > 0.0)
-        ax.plot(velocities_cm_s[valid], forces_n[valid], marker="o", markersize=3, linewidth=1.5, color="tab:blue")
+        v_valid = velocities_cm_s[valid]
+        f_valid = forces_n[valid]
+        ax.plot(v_valid, f_valid, marker="o", markersize=3, linewidth=1.5, color="tab:blue")
+
+        if condition in POWER_LAW_FIT_CONDITIONS and len(v_valid) >= 2 * POWER_LAW_FIT_N_POINTS:
+            for fit_label, points, color in POWER_LAW_FIT_SPECS:
+                v_fit = v_valid[points]
+                f_fit = f_valid[points]
+                slope, coeff = fit_power_law(v_fit, f_fit)
+                ax.plot(
+                    v_fit,
+                    coeff * v_fit**slope,
+                    linestyle="--",
+                    linewidth=2.2,
+                    color=color,
+                    label=f"{fit_label}: $F\\sim v^{{{slope:.2f}}}$",
+                )
+
         ax.axvline(
             thermal_speed_cm_s,
             color="k",
