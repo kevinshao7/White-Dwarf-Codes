@@ -43,13 +43,13 @@ if str(THEORY_DIR) not in sys.path:
 from finite.finite_launch import FiniteLaunchDrag  # noqa: E402
 
 CONDITIONS = (0, 1, 2, 3)
-N_VELOCITIES = 40
+N_VELOCITIES = 80
 VELOCITY_MIN_CM_S = 1.0e4
 VELOCITY_MAX_CM_S = 1.0e8
 CM_PER_M = 100.0
 
 POWER_LAW_FIT_CONDITIONS = (0, 2)
-POWER_LAW_FIT_N_POINTS = 10
+POWER_LAW_FIT_N_POINTS = 5
 POWER_LAW_FIT_SPECS = (
     ("low-v fit", slice(0, POWER_LAW_FIT_N_POINTS), "tab:green"),
     ("high-v fit", slice(-POWER_LAW_FIT_N_POINTS, None), "tab:red"),
