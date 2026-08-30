@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:h200:1
 #SBATCH --mem=250000
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 
 #SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/daisconvergencesweep
 #SBATCH --output=dais_ratio_NSi1000_c1_%j.out
