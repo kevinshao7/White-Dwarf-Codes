@@ -96,7 +96,7 @@ DEFAULT_VRES = 101
 # points' own velocity range for that condition -- denser than, but not
 # extrapolated beyond, the (typically much sparser) points the fit itself
 # used.
-DEFAULT_SMOOTH_CURVE_POINTS = 200
+DEFAULT_SMOOTH_CURVE_POINTS = 100
 
 
 @dataclass(frozen=True)
