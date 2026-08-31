@@ -10,7 +10,7 @@ unforced/run7_28/
 *.npy
 deprecateed/
 *diagnostics*
-
+*daisoconvergencesweepresults*
 # Processed LAMMPS drag-fit results consumed by theory/finite/lammps_fit/
 # fit_bmax_to_lammps.py -- small (~2KB), tracked despite the blanket *.npy
 # rule above so the b_max fit is reproducible from a fresh clone.

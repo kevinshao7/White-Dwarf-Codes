@@ -3,13 +3,13 @@
 
 
 # -----------Changeable parameters -----------
-variable vb equal 1.0e7
-variable T0 equal 100000
-variable rhoH equal 1.0e-5 #gcc
-variable rhoS equal 1.79e-4 #gcc
-variable ZH equal 0.955
-variable ZSi equal 4.91
-variable ccs equal 1e-6 #collision cross section in cm^2
+variable vb equal 4.641589e+07
+variable T0 equal 1.000000e+05
+variable rhoH equal 1.000000e+00 #gcc
+variable rhoS equal 7.200000e+00 #gcc
+variable ZH equal 6.800000e-01
+variable ZSi equal 3.810000e+00
+variable ccs equal 5.286349e-19 #collision cross section in cm^2
 variable dtfrac equal 1e-3
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
@@ -55,7 +55,7 @@ if "$(v_dtdens) >= $(v_dtscreen)" then "variable dt equal $(v_dtscreen)"
 if "$(v_dtdens) < $(v_dtscreen)" then "variable dt equal $(v_dtdens)"
 
 #use screening length for cutoff, not interparticle spacing
-variable rc_cm equal $(300*v_lS) #cutoff is in centimeters, three times screening length
+variable rc_cm equal $(300*v_lS) #cutoff is 3 times screening length, in cm
 #if "$(v_a_cm) >= $(v_lD_cm)" then "variable rc_cm equal $(2*v_a_cm)"
 #if "$(v_a_cm) < $(v_lD_cm)" then "variable rc_cm equal $(2*v_lD_cm)"
 
@@ -95,8 +95,8 @@ thermo 1000
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
-dump mydmp Si custom 100 traj.txt id type vx vy vz
-log firstlog
+dump mydmp Si custom 100 traj_unforcedprod_v4.6e+07_c3.txt id type vx vy vz
+log unforcedprod_v4.6e+07_c3.log
 
 #-----------------Run-----------------------
 fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)

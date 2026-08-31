@@ -1,0 +1,14 @@
+{
+  "created_utc": "2026-08-31T03:17:11.224373+00:00",
+  "source": "processed_data_time_series",
+  "condition": 1,
+  "output_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\daisprocesscodes\\output\\velocity_overlays_c1",
+  "figures": [
+    "box_c1_velocity_time_overlay.png",
+    "box_c1_normalized_velocity_time_overlay.png",
+    "cutoff_c1_velocity_time_overlay.png",
+    "cutoff_c1_normalized_velocity_time_overlay.png",
+    "ratio_c1_velocity_time_overlay.png",
+    "ratio_c1_normalized_velocity_time_overlay.png"
+  ]
+}

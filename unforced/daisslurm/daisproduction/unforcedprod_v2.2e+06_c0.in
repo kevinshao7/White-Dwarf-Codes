@@ -3,13 +3,13 @@
 
 
 # -----------Changeable parameters -----------
-variable vb equal 1.0e7
-variable T0 equal 100000
-variable rhoH equal 1.0e-5 #gcc
-variable rhoS equal 1.79e-4 #gcc
-variable ZH equal 0.955
-variable ZSi equal 4.91
-variable ccs equal 1e-6 #collision cross section in cm^2
+variable vb equal 2.154435e+06
+variable T0 equal 5.000000e+03
+variable rhoH equal 1.000000e-05 #gcc
+variable rhoS equal 1.790000e-04 #gcc
+variable ZH equal 1.600000e-01
+variable ZSi equal 2.600000e-01
+variable ccs equal 8.667902e-16 #collision cross section in cm^2
 variable dtfrac equal 1e-3
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 
@@ -18,7 +18,7 @@ variable avogadro equal 6.022e23
 variable mH equal $(0.001*1.008/v_avogadro) #Hydrogen mass kg/atom
 variable mSi equal $(0.001*28.09/v_avogadro) #Silicon mass kg/atom
 variable NH equal 100000
-variable NSi equal 1000
+variable NSi equal 300
 variable kb equal 1.38e-23 #SI units
 variable ctostatc equal 2.99792e9 #coulomb to statcoulomb
 variable qe equal 1.60217663e-19 #SI units
@@ -39,23 +39,23 @@ variable dtdens equal $(0.01*v_side/((v_vthh+v_vb)*((v_NH+v_NSi)^(1/3))))
 
 # -- Screening Length
 variable ne equal $(1e6*v_avogadro*v_ZH*v_rhoH/1.008) #electron number density SI
-variable ve equal $(sqrt(3*v_kb*v_T0/v_me))
+variable ve equal $(sqrt(v_kb*v_T0/v_me)) #1D electron thermal speed for standard Debye length
 variable wp equal $(sqrt(v_ne*(v_qe^2)/(v_me*v_e0)))
-variable lD equal $(v_ve/v_wp) #debye length
+variable lD equal $(v_ve/v_wp) #sqrt(e0*kB*T/(ne*qe^2)), SI metres
 variable lD_cm equal $(100*v_lD)
 variable a_cm equal $((v_vol/(v_NH+v_NSi))^(1.0/3.0)) #interactomic spacing cm
 
 
 
 variable TF equal $(((3*v_ne*(v_pi^2))^(2/3))*(v_hbar^2)/(2*v_me*v_kb))
-variable lS equal $(v_lD*((1+(2*v_TF/(4*v_T0)))^(1/4)))
-variable k0 equal $(1/(100*v_lS)) #screening length in cm^-1
+variable lS equal $(v_lD*((1+(2*v_TF/(3*v_T0)))^(1/4)))
+variable k0 equal $(1/(100*v_lS)) #inverse screening length in cm^-1
 variable dtscreen equal $(v_dtfrac/((v_vthh+v_vb)*v_k0))
 if "$(v_dtdens) >= $(v_dtscreen)" then "variable dt equal $(v_dtscreen)"
 if "$(v_dtdens) < $(v_dtscreen)" then "variable dt equal $(v_dtdens)"
 
 #use screening length for cutoff, not interparticle spacing
-variable rc_cm equal $(200*v_lS) #cutoff is in centimeters, two times screening length
+variable rc_cm equal $(300*v_lS) #cutoff is 3 times screening length, in cm
 #if "$(v_a_cm) >= $(v_lD_cm)" then "variable rc_cm equal $(2*v_a_cm)"
 #if "$(v_a_cm) < $(v_lD_cm)" then "variable rc_cm equal $(2*v_lD_cm)"
 
@@ -95,8 +95,8 @@ thermo 1000
 compute tempH H temp
 compute tempSi Si temp
 thermo_style custom step time temp c_tempH c_tempSi etotal pe ke press v_k0 v_dt v_collfreq v_ccs
-dump mydmp Si custom 100 traj.txt id type vx vy vz
-log firstlog
+dump mydmp Si custom 100 traj_unforcedprod_v2.2e+06_c0.txt id type vx vy vz
+log unforcedprod_v2.2e+06_c0.log
 
 #-----------------Run-----------------------
 fix mynvt all nvt temp $(v_T0) $(v_T0) $(100.0*v_dt)

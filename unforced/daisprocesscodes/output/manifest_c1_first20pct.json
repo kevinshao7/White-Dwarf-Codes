@@ -1,0 +1,18 @@
+{
+  "created_utc": "2026-08-31T03:10:53.508093+00:00",
+  "source": "processed_data_time_series",
+  "condition": 1,
+  "fit_skip_rows": 10,
+  "max_decay_fraction_of_start_velocity": 0.2,
+  "note": "This mode replaces output/figures and output/diagnostics with c1-only first-20%-drop plots.",
+  "summary_csv": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\daisprocesscodes\\output\\processed_data\\dais_c1_first20pct_refit_summary.csv",
+  "figures_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\daisprocesscodes\\output\\figures",
+  "diagnostics_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\daisprocesscodes\\output\\diagnostics",
+  "processed_count": 12,
+  "status_counts": {
+    "ok": 12,
+    "review": 0,
+    "ignored": 0,
+    "failed": 0
+  }
+}

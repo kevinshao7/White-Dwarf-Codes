@@ -1,5 +1,8 @@
 """Generate the DAIS convergence sweep from the unchanged base templates."""
+"""
+& "C:\Program Files\Git\usr\bin\scp.exe" -r -o "ProxyJump=kshao@gate1.mpcdf.mpg.de" "kshao@dais11:/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/daisconvergencesweep/." "/c/Users/shaoq/Documents/Mainz/mlip/outputsfull/daisconvergencesweep/"
 
+"""
 from __future__ import annotations
 
 import math
@@ -95,11 +98,11 @@ def make_input(template: str, name: str, case: dict[str, float], nh: int, nsi: i
         "variable ZSi equal 4.91": f"variable ZSi equal {case['ZSi']:.5e}",
         "variable ccs equal 1e-6 #collision cross section in cm^2": f"variable ccs equal {collision_cross_section_cm2(case):.5e} #collision cross section in cm^2",
         "variable NH equal 100000": f"variable NH equal {nh}",
-        "variable NSi equal 1000": f"variable NSi equal {nsi}",
-        "variable ve equal $(sqrt(3*v_kb*v_T0/v_me))": "variable ve equal $(sqrt(v_kb*v_T0/v_me)) #1D electron thermal speed for standard Debye length",
-        "variable lD equal $(v_ve/v_wp) #debye length": "variable lD equal $(v_ve/v_wp) #sqrt(e0*kB*T/(ne*qe^2)), SI metres",
-        "variable lS equal $(v_lD*((1+(2*v_TF/(4*v_T0)))^(1/4)))": "variable lS equal $(v_lD*((1+(2*v_TF/(3*v_T0)))^(1/4)))",
-        "variable rc_cm equal $(200*v_lS) #cutoff is in centimeters, two times screening length": f"variable rc_cm equal $({100 * cutoff}*v_lS) #cutoff is {cutoff} times screening length, in cm",
+        "variable NSi equal 300": f"variable NSi equal {nsi}",
+        "variable ve equal $(sqrt(v_kb*v_T0/v_me)) #1D electron thermal speed for standard Debye length": "variable ve equal $(sqrt(v_kb*v_T0/v_me)) #1D electron thermal speed for standard Debye length",
+        "variable lD equal $(v_ve/v_wp) #sqrt(e0*kB*T/(ne*qe^2)), SI metres": "variable lD equal $(v_ve/v_wp) #sqrt(e0*kB*T/(ne*qe^2)), SI metres",
+        "variable lS equal $(v_lD*((1+(2*v_TF/(3*v_T0)))^(1/4)))": "variable lS equal $(v_lD*((1+(2*v_TF/(3*v_T0)))^(1/4)))",
+        "variable rc_cm equal $(300*v_lS) #cutoff is in centimeters, three times screening length": f"variable rc_cm equal $({100 * cutoff}*v_lS) #cutoff is {cutoff} times screening length, in cm",
         "dump mydmp Si custom 100 traj.txt id type vx vy vz": f"dump mydmp Si custom 100 traj_{name}.txt id type vx vy vz",
         "log firstlog": f"log {name}.log",
     }
