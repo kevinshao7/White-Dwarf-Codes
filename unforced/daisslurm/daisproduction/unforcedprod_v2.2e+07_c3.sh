@@ -9,7 +9,7 @@
 #SBATCH --mem=250000
 #SBATCH --time=04:00:00
 
-#SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/daisproduction
+#SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/daisslurm/daisproduction
 #SBATCH --output=unforcedprod_v2.2e+07_c3_%j.out
 #SBATCH --error=unforcedprod_v2.2e+07_c3_%j.err
 
@@ -55,8 +55,19 @@ nvidia-smi \
     --query-gpu=name,uuid,driver_version,memory.total \
     --format=csv
 
-test -x "$LMP"
-test -f "$INPUT"
+if [[ ! -x "$LMP" ]]; then
+    echo "ERROR: LAMMPS executable is missing or not executable: $LMP" >&2
+    ls -l "$LMP" >&2 || true
+    exit 1
+fi
+
+if [[ ! -f "$INPUT" ]]; then
+    echo "ERROR: LAMMPS input file is missing from $(pwd): $INPUT" >&2
+    ls -l >&2
+    exit 1
+fi
+
+echo "Preflight checks passed; launching LAMMPS."
 
 srun \
     --ntasks="$SLURM_NTASKS" \

@@ -9,7 +9,7 @@ variable rhoH equal 1.000000e-05 #gcc
 variable rhoS equal 1.790000e-04 #gcc
 variable ZH equal 1.600000e-01
 variable ZSi equal 2.600000e-01
-variable ccs equal 2.650871e-21 #collision cross section in cm^2
+variable ccs equal 1.621151e-21 #collision cross section in cm^2
 variable dtfrac equal 1e-3
 variable offangle equal 0.3 #offset angle in radians to prevent overlapping tracks
 

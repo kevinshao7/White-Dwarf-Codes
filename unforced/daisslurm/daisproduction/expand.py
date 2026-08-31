@@ -94,9 +94,10 @@ def collision_cross_section_cm2(velocity_cm_s: float, case: dict[str, float]) ->
     """Yukawa turning-point cross section in cm^2 using corrected lS."""
     thermal_h = math.sqrt(3.0 * KB * case["T"] / MH)
     thermal_si = math.sqrt(3.0 * KB * case["T"] / MSI)
-    vrel = 0.01 * velocity_cm_s - thermal_h - thermal_si
-    if vrel <= 0.0:
-        return 0.0
+    # The production LAMMPS input uses vthh + vths + vb as the collision-speed
+    # scale.  Use the same positive relative speed here; subtracting thermal
+    # speeds made the lowest-velocity cases emit an unphysical zero cross section.
+    vrel = 0.01 * velocity_cm_s + thermal_h + thermal_si
     vcom = MH * vrel / (MH + MSI)
     available_energy = 0.5 * MH * (vrel - vcom) ** 2 + 0.5 * MSI * vcom**2
     coulomb_prefactor = QE**2 * case["ZH"] * case["ZSi"] / (4.0 * PI * EPS0)
@@ -157,7 +158,7 @@ def make_sbatch(template: str, name: str, condition: int) -> str:
     result = replace_line(
         result,
         "#SBATCH --chdir=",
-        "#SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/dais/daisproduction",
+        "#SBATCH --chdir=/dais/fs/scratch/kshao/wd/White-Dwarf-Codes/unforced/daisslurm/daisproduction",
     )
     result = replace_line(result, "#SBATCH --output=", f"#SBATCH --output={name}_%j.out")
     result = replace_line(result, "#SBATCH --error=", f"#SBATCH --error={name}_%j.err")
