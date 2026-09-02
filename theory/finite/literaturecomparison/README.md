@@ -4,15 +4,18 @@
 with two parameter-free analytic weak-coupling references across the Bragg
 peak region:
 
-- Landau/Spitzer Maxwellian dynamical friction (the form given by Gurnett &
-  Bhattacharjee and Boyd & Sanderson), with a smooth Yukawa-screened Coulomb
-  logarithm;
-- the first-Born Yukawa momentum-transfer logarithm.
+- Gurnett & Bhattacharjee / Boyd & Sanderson Maxwellian dynamical friction,
+  with a smooth Yukawa-screened Coulomb logarithm;
+- Yukawa first-Born momentum-transfer theory, using the Li & Petrasso quantum
+  lower cutoff.
 
 Both use the finite solver's pair potential, reduced mass, density,
 temperature, and Melrose-corrected screening length.  Their lower cut-off is
 the physical combination `sqrt(b_90**2 + (hbar/(2*mu*v))**2)`, so there are no
-fit parameters.
+fit parameters.  The second curve is labelled carefully: Li & Petrasso supply
+the quantum cutoff used here, while the screened Born transport logarithm is
+the analytic weak-Yukawa reduction rather than their full plasma-oscillation
+stopping-power model.
 
 Run from `White-Dwarf-Codes`:
 

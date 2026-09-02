@@ -121,7 +121,15 @@ def main() -> None:
         logs = {name: generalized_coulomb_logarithm(numerical, velocities_m_s, name) for name in MODEL_LABELS}
 
         force_ax = axes.flat[panel_index]
-        force_ax.loglog(velocities_cm_s, finite_force, "o-", ms=3, lw=1.5, color="black", label="finite-launch numerical")
+        force_ax.loglog(
+            velocities_cm_s,
+            finite_force,
+            "o-",
+            ms=3,
+            lw=1.5,
+            color="black",
+            label="This work: finite-launch Yukawa",
+        )
         for name, label in MODEL_LABELS.items():
             force_ax.loglog(velocities_cm_s, analytic[name], lw=1.7, label=label)
         force_ax.set_ylabel("drag magnitude (N)")
@@ -146,7 +154,7 @@ def main() -> None:
         axis.set_xlabel("bulk velocity (cm s$^{-1}$)")
     for axis in axes.flat[n_conditions:]:
         axis.remove()
-    fig.suptitle("Finite-launch Yukawa drag vs analytic weak-coupling Yukawa references", y=0.99)
+    fig.suptitle("This work: finite-launch Yukawa drag vs analytic literature theories", y=0.99)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
     figure_path = args.output / "comparison.png"
     fig.savefig(figure_path, dpi=200)

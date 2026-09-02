@@ -10,11 +10,13 @@ fits, and should only be interpreted where ``b_90 / lambda_s << 1``.
 Two analytic screening choices are provided:
 
 ``landau``
+    Gurnett--Bhattacharjee / Boyd--Sanderson Maxwellian friction with
     ``0.5 log(1 + (lambda_s/b_min)^2)``.  This is the usual weak-scattering
     Coulomb-log prescription with a smooth finite cut-off.
 ``born_transport``
-    ``0.5 [log(1+x) - x/(1+x)]``.  This is the first-Born Yukawa momentum-
-    transfer cross section written as a generalized Coulomb logarithm.
+    Yukawa first-Born momentum-transfer theory, with the Li--Petrasso
+    quantum lower cutoff.  Its generalized Coulomb logarithm is
+    ``0.5 [log(1+x) - x/(1+x)]``.
 
 In both cases ``b_min = sqrt(b_90^2 + b_q^2)`` uses the classical 90-degree
 impact parameter and the Li--Petrasso diffraction scale
@@ -31,8 +33,8 @@ from scipy.special import erf
 
 
 MODEL_LABELS = {
-    "landau": "Landau/Spitzer, screened Coulomb log",
-    "born_transport": "Weak-Yukawa Born transport",
+    "landau": "Gurnett--Bhattacharjee / Boyd--Sanderson",
+    "born_transport": "Yukawa Born transport (Li--Petrasso cutoff)",
 }
 
 
@@ -81,10 +83,10 @@ def generalized_coulomb_logarithm(source, speed_m_s, model: str = "born_transpor
 def drag_force(source, speed_m_s, model: str = "born_transport"):
     """Magnitude of the analytic dynamical-friction force in newtons.
 
-    This is the Gurnett--Bhattacharjee / Boyd--Sanderson Maxwellian drag
-    formula for a Si test particle in the hydrogen background represented by
-    ``source``.  The returned quantity is positive; the physical force is
-    opposite the supplied bulk-velocity vector.
+    This is the Gurnett--Bhattacharjee / Boyd--Sanderson Maxwellian
+    dynamical-friction formula for a Si test particle in the hydrogen
+    background represented by ``source``.  The returned quantity is positive;
+    the physical force is opposite the supplied bulk-velocity vector.
     """
     speed = _positive_speed(speed_m_s)
     kernel = maxwell_drag_kernel(speed, source.mh, source.T, source.kb)
