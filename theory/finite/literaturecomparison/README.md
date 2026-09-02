@@ -20,9 +20,9 @@ Run from `White-Dwarf-Codes`:
 python theory/finite/literaturecomparison/compare_weak_yukawa.py --conditions 0 1 2 3
 ```
 
-It writes `comparison.png` and `comparison.csv` under
-`literaturecomparison/weak_yukawa_comparison/`.  The second panel per
-condition gives `b_90/lambda_s`; values well below one mark the regime where
+It writes a 2x2 drag-magnitude figure (`comparison.png`) and a CSV
+(`comparison.csv`) under `literaturecomparison/weak_yukawa_comparison/`.
+The CSV retains `b_90/lambda_s`; values well below one mark the regime where
 the analytic weak-scattering theories are applicable.  The script deliberately
 excludes fitted strong-coupling cross sections (Stanton/Sprenkle), Grabowski's
 multi-parameter fit, and effective-potential theories.

@@ -105,10 +105,13 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     velocities_cm_s = np.logspace(math.log10(args.vmin_cm_s), math.log10(args.vmax_cm_s), args.points)
     velocities_m_s = velocities_cm_s / 100.0
-    fig, axes = plt.subplots(len(args.conditions), 2, figsize=(12, 4.4 * len(args.conditions)), squeeze=False)
+    n_conditions = len(args.conditions)
+    n_columns = 2
+    n_rows = math.ceil(n_conditions / n_columns)
+    fig, axes = plt.subplots(n_rows, n_columns, figsize=(12, 4.5 * n_rows), squeeze=False)
     rows: list[dict[str, float | int | str]] = []
 
-    for row_index, condition in enumerate(args.conditions):
+    for panel_index, condition in enumerate(args.conditions):
         numerical = FiniteLaunchDrag(
             condition, method="vectorized", vres=args.vres, rhores=args.rhores, dphires=args.dphires
         )
@@ -117,7 +120,7 @@ def main() -> None:
         ratio = weak_coupling_ratio(numerical, velocities_m_s)
         logs = {name: generalized_coulomb_logarithm(numerical, velocities_m_s, name) for name in MODEL_LABELS}
 
-        force_ax, ratio_ax = axes[row_index]
+        force_ax = axes.flat[panel_index]
         force_ax.loglog(velocities_cm_s, finite_force, "o-", ms=3, lw=1.5, color="black", label="finite-launch numerical")
         for name, label in MODEL_LABELS.items():
             force_ax.loglog(velocities_cm_s, analytic[name], lw=1.7, label=label)
@@ -125,14 +128,6 @@ def main() -> None:
         force_ax.set_title(f"Condition {condition}: T={numerical.T:.0e} K, density={numerical.gcc:.0e} g cm$^{{-3}}$")
         force_ax.grid(True, which="both", alpha=0.25)
         force_ax.legend(fontsize=8)
-
-        ratio_ax.semilogx(velocities_cm_s, ratio, color="tab:red", label=r"$b_{90}/\lambda_s$")
-        ratio_ax.semilogx(velocities_cm_s, logs["born_transport"], color="tab:blue", label=r"$\Xi_{Y}$ (Born)")
-        ratio_ax.axhline(0.1, color="k", ls="--", lw=1, label="weak-coupling guide")
-        ratio_ax.set_yscale("log")
-        ratio_ax.set_ylabel("dimensionless")
-        ratio_ax.grid(True, which="both", alpha=0.25)
-        ratio_ax.legend(fontsize=8)
 
         for index, velocity in enumerate(velocities_m_s):
             rows.append({
@@ -147,10 +142,12 @@ def main() -> None:
                 "born_transport_coulomb_log": logs["born_transport"][index],
             })
 
-    for axis in axes[-1]:
+    for axis in axes.flat[:n_conditions]:
         axis.set_xlabel("bulk velocity (cm s$^{-1}$)")
-    fig.suptitle("Finite-launch Yukawa drag vs analytic weak-coupling Yukawa references", y=0.995)
-    fig.tight_layout()
+    for axis in axes.flat[n_conditions:]:
+        axis.remove()
+    fig.suptitle("Finite-launch Yukawa drag vs analytic weak-coupling Yukawa references", y=0.99)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
     figure_path = args.output / "comparison.png"
     fig.savefig(figure_path, dpi=200)
     plt.close(fig)
