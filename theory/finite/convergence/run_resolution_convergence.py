@@ -1,37 +1,11 @@
 # Run from repository root:
-#   python .\theory\finite\convergence\run_resolution_convergence.py --workers 8
-"""Drag-force-vs-velocity resolution convergence for FiniteLaunchDrag, condition 0 only.
+#   python .\theory\finite\convergence\run_resolution_convergence.py
+"""Finite-launch drag convergence tests using vectorized quadrature.
 
-`FiniteLaunchDrag` (``method="vectorized"``) has three independent resolution
-knobs: ``vres`` (midpoint rule over the relative-velocity Maxwellian inside
-``drag``), ``rhores`` (log-spaced midpoint rule over the impact parameter `b`
-inside `impact_parameter_integral`), and ``dphires`` (midpoint rule over the
-regularised scattering-angle integral inside `orbit_angle`). This script
-sweeps each one individually -- holding the other two fixed at the finest
-resolution tested -- to see how the *predicted drag force itself* depends on
-each grid's resolution, for condition 0 (T and density read directly off the
-`FiniteLaunchDrag` instance so the plot labels can never drift from
-`dragbase2.py`).
-
-Only ``method="vectorized"`` is used -- no `scipy.integrate.quad` call is made
-anywhere in this script.
-
-Two plots are produced:
-
-  1. ``condition_0_drag_vs_velocity.png`` -- drag force (N) vs bulk velocity
-     (cm/s, log-spaced), log-log.
-  2. ``condition_0_relative_error_vs_velocity.png`` -- relative error (log
-     scale) vs the same velocity axis. The reference for each scan is that
-     scan's own finest tested resolution (the largest value in
-     ``--resolutions``, already computed as part of the sweep) -- there is no
-     separate quad-based ground truth.
-
-Each plot has up to 3 scans x len(resolutions) lines. Colour encodes which
-parameter is being swept (blue = vres, orange = rhores, purple = dphires);
-linestyle encodes resolution (dotted -> dashed -> dashdot -> solid as
-resolution increases, so the finest tested resolution in each scan is always
-the solid line), so both the per-scan convergence trend and the three scans
-are visible at a glance.
+One 2-by-2 figure is produced: velocity, impact-parameter, and
+scattering-angle resolution scans, plus the drag-force shape as bmax changes
+in screening-length units.  Resolution errors are computed over a log-spaced
+bulk-velocity grid; bmax errors are retained in the CSV.
 """
 
 from __future__ import annotations
@@ -61,227 +35,249 @@ from finite.progress import run_pool_with_heartbeat  # noqa: E402
 CONDITION = 0
 SCAN_TYPES = ("vres", "rhores", "dphires")
 SCAN_LABELS = {
-    "vres": "velocity resolution (vres)",
-    "rhores": "impact-parameter resolution (rhores)",
-    "dphires": "scattering-angle resolution (dphires)",
+    "vres": "velocity resolution",
+    "rhores": "impact-parameter resolution",
+    "dphires": "scattering-angle resolution",
 }
-SCAN_COLORS = {"vres": "tab:blue", "rhores": "tab:orange", "dphires": "tab:purple"}
-# Cycle read finest-last so the finest tested resolution in a scan is always solid.
-_LINESTYLE_CYCLE = ("dotted", "dashed", "dashdot", "solid")
 
+# Production defaults: resolution scans change only their named grid.  The
+# bmax scan uses all three values unchanged.
+DEFAULT_VRES = 100
+DEFAULT_RHORES = 300
+DEFAULT_DPHIRES = 300
 DEFAULT_RESOLUTIONS = (30, 100, 300, 1000)
+DEFAULT_BMAX_OVER_SCREENING_LENGTH = (0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0)
+BMAX_ERROR_REFERENCE = 1000.0
 DEFAULT_N_VELOCITIES = 16
 DEFAULT_VELOCITY_MIN_CM_S = 1.0e5
 DEFAULT_VELOCITY_MAX_CM_S = 1.0e8
+DEFAULT_WORKERS = 24
 CM_PER_M = 100.0
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = sorted({key for row in rows for key in row})
     with path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer = csv.DictWriter(fh, fieldnames=sorted({key for row in rows for key in row}))
         writer.writeheader()
         writer.writerows(rows)
 
 
-def compute_force_task(task: tuple[str, int, int, int, float]) -> dict[str, object]:
-    scan_type, resolution, hold_resolution, velocity_index, velocity_cm_s = task
-    velocity_m_s = velocity_cm_s / CM_PER_M
+def default_resolution() -> dict[str, int]:
+    return {"vres": DEFAULT_VRES, "rhores": DEFAULT_RHORES, "dphires": DEFAULT_DPHIRES}
 
-    if scan_type == "vres":
-        vres, rhores, dphires = resolution, hold_resolution, hold_resolution
-    elif scan_type == "rhores":
-        vres, rhores, dphires = hold_resolution, resolution, hold_resolution
-    elif scan_type == "dphires":
-        vres, rhores, dphires = hold_resolution, hold_resolution, resolution
+
+def bmax_to_rhomax_fraction(bmax_over_screening_length: float) -> float:
+    """Convert bmax/lambda_S to the launch radius in a_H units.
+
+    ``FiniteLaunchDrag`` sets bmax equal to its launch radius.  Its
+    ``rhomax_fraction`` is this radius in hydrogen interparticle spacings;
+    lambda_S/a_H is ``ustart/k0``.
+    """
+    baseline = FiniteLaunchDrag(CONDITION, method="vectorized", **default_resolution())
+    return bmax_over_screening_length * baseline.ustart / baseline.k0
+
+
+def compute_force_task(task: tuple[str, float, int, float]) -> dict[str, object]:
+    test_type, test_value, velocity_index, velocity_cm_s = task
+    resolution = default_resolution()
+    rhomax_fraction = 1.0
+    if test_type in SCAN_TYPES:
+        resolution[test_type] = int(test_value)
+    elif test_type == "bmax_over_screening_length":
+        rhomax_fraction = bmax_to_rhomax_fraction(test_value)
     else:
-        raise ValueError(f"unknown scan_type {scan_type!r}")
+        raise ValueError(f"unknown test_type {test_type!r}")
 
-    drag = FiniteLaunchDrag(CONDITION, method="vectorized", vres=vres, rhores=rhores, dphires=dphires)
-    force_n = drag.drag(velocity_m_s)
-
+    drag = FiniteLaunchDrag(
+        CONDITION,
+        method="vectorized",
+        rhomax_fraction=rhomax_fraction,
+        **resolution,
+    )
+    force_n = drag.drag(velocity_cm_s / CM_PER_M)
     return {
-        "scan_type": scan_type,
-        "resolution": resolution,
-        "vres": vres,
-        "rhores": rhores,
-        "dphires": dphires,
+        "test_type": test_type,
+        "test_value": test_value,
+        **resolution,
+        "rhomax_fraction": rhomax_fraction,
         "velocity_index": velocity_index,
         "velocity_cm_s": velocity_cm_s,
-        "velocity_m_s": velocity_m_s,
         "force_n": force_n,
     }
 
 
-def add_relative_error(rows: list[dict[str, object]], hold_resolution: int) -> None:
-    """Relative error vs. each scan's own finest tested resolution (in place)."""
-    reference_force = {
-        (row["scan_type"], row["velocity_index"]): row["force_n"]
+def add_relative_errors(
+    rows: list[dict[str, object]], resolutions: tuple[int, ...], bmax_values: tuple[float, ...]
+) -> None:
+    """Use finest resolution and bmax/lambda_S=1000 as their references."""
+    references = {
+        (row["test_type"], row["velocity_index"]): row["force_n"]
         for row in rows
-        if row["resolution"] == hold_resolution
+        if (
+            row["test_type"] in SCAN_TYPES and int(row["test_value"]) == max(resolutions)
+        )
+        or (
+            row["test_type"] == "bmax_over_screening_length"
+            and float(row["test_value"]) == BMAX_ERROR_REFERENCE
+        )
     }
     for row in rows:
-        ref = reference_force[(row["scan_type"], row["velocity_index"])]
-        row["relative_error"] = abs(row["force_n"] - ref) / abs(ref) if ref != 0.0 else float("nan")
+        reference = references[(row["test_type"], row["velocity_index"])]
+        row["relative_error"] = abs(row["force_n"] - reference) / abs(reference) if reference else float("nan")
 
 
-def _resolution_linestyles(resolutions: tuple[int, ...]) -> dict[int, str]:
-    resolutions_sorted = sorted(resolutions)
-    n = len(resolutions_sorted)
-    if n <= len(_LINESTYLE_CYCLE):
-        chosen = _LINESTYLE_CYCLE[-n:] if n > 0 else ()
-    else:
-        chosen = [_LINESTYLE_CYCLE[i % len(_LINESTYLE_CYCLE)] for i in range(n)]
-    return dict(zip(resolutions_sorted, chosen))
-
-
-def make_drag_force_plot(rows: list[dict[str, object]], resolutions: tuple[int, ...], condition_label: str) -> None:
+def rainbow_colors(values: tuple[float, ...]) -> dict[float, object]:
+    """Assign one distinct rainbow colour to every resolution/cutoff value."""
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(7.5, 5.5))
-    linestyles = _resolution_linestyles(resolutions)
-
-    for scan_type in SCAN_TYPES:
-        for res in sorted(resolutions):
-            curve = sorted(
-                (row for row in rows if row["scan_type"] == scan_type and row["resolution"] == res),
-                key=lambda row: float(row["velocity_cm_s"]),
-            )
-            v = np.array([float(row["velocity_cm_s"]) for row in curve])
-            f = np.array([float(row["force_n"]) for row in curve])
-            valid = np.isfinite(f) & (f > 0.0)
-            ax.plot(
-                v[valid],
-                f[valid],
-                color=SCAN_COLORS[scan_type],
-                linestyle=linestyles[res],
-                linewidth=1.8,
-                label=f"{SCAN_LABELS[scan_type]}, n={res}",
-            )
-
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("bulk velocity $v_b$ (cm/s)")
-    ax.set_ylabel("drag force $F$ (N)")
-    ax.set_title(f"{condition_label}\ndrag force vs velocity (vectorized method)")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(fontsize=7, loc="best", ncol=2)
-    fig.tight_layout()
-    fig.savefig(OUTDIR / "condition_0_drag_vs_velocity.png", dpi=200)
-    plt.close(fig)
+    values = tuple(sorted(values))
+    return dict(zip(values, plt.colormaps["turbo"](np.linspace(0.05, 0.95, len(values)))))
 
 
-def make_relative_error_plot(
-    rows: list[dict[str, object]], resolutions: tuple[int, ...], hold_resolution: int, condition_label: str
+def plot_error_curves(
+    axis,
+    rows: list[dict[str, object]],
+    test_type: str,
+    values: tuple[float, ...],
+    label_prefix: str,
+) -> None:
+    reference = max(values)
+    colors = rainbow_colors(values)
+    for value in sorted(values):
+        if value == reference:
+            continue  # Reference error is zero and cannot be drawn on a log axis.
+        curve = sorted(
+            (row for row in rows if row["test_type"] == test_type and float(row["test_value"]) == value),
+            key=lambda row: float(row["velocity_cm_s"]),
+        )
+        velocity = np.array([float(row["velocity_cm_s"]) for row in curve])
+        error = np.array([float(row["relative_error"]) for row in curve])
+        valid = np.isfinite(error) & (error > 0.0)
+        axis.plot(
+            velocity[valid],
+            error[valid],
+            color=colors[value],
+            linestyle="solid",
+            linewidth=1.8,
+            label=f"{label_prefix}={value:g}",
+        )
+
+
+def make_convergence_figure(
+    rows: list[dict[str, object]], resolutions: tuple[int, ...], bmax_values: tuple[float, ...], condition_label: str
 ) -> None:
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(7.5, 5.5))
-    linestyles = _resolution_linestyles(resolutions)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5), sharex=True)
+    for axis, scan_type in zip(axes.flat[:3], SCAN_TYPES):
+        plot_error_curves(
+            axis,
+            rows,
+            scan_type,
+            tuple(float(value) for value in resolutions),
+            "n",
+        )
+        axis.set_title(f"{SCAN_LABELS[scan_type]} scan")
+        axis.legend(fontsize=8, title="resolution")
 
-    for scan_type in SCAN_TYPES:
-        for res in sorted(resolutions):
-            if res == hold_resolution:
-                # This is the reference resolution for its own scan -- error
-                # is identically zero and cannot be shown on a log axis.
-                continue
-            curve = sorted(
-                (row for row in rows if row["scan_type"] == scan_type and row["resolution"] == res),
-                key=lambda row: float(row["velocity_cm_s"]),
-            )
-            v = np.array([float(row["velocity_cm_s"]) for row in curve])
-            err = np.array([float(row["relative_error"]) for row in curve])
-            valid = np.isfinite(err) & (err > 0.0)
-            ax.plot(
-                v[valid],
-                err[valid],
-                color=SCAN_COLORS[scan_type],
-                linestyle=linestyles[res],
-                linewidth=1.8,
-                label=f"{SCAN_LABELS[scan_type]}, n={res}",
-            )
+    bmax_axis = axes.flat[3]
+    bmax_colors = rainbow_colors(bmax_values)
+    for bmax in bmax_values:
+        curve = sorted(
+            (
+                row
+                for row in rows
+                if row["test_type"] == "bmax_over_screening_length" and float(row["test_value"]) == bmax
+            ),
+            key=lambda row: float(row["velocity_cm_s"]),
+        )
+        velocity = np.array([float(row["velocity_cm_s"]) for row in curve])
+        force = np.array([float(row["force_n"]) for row in curve])
+        valid = np.isfinite(force) & (force > 0.0)
+        bmax_axis.plot(
+            velocity[valid],
+            force[valid],
+            color=bmax_colors[bmax],
+            linewidth=1.8,
+            label=rf"$b_{{max}}/\lambda_S={bmax:g}$",
+        )
+    bmax_axis.set_title(r"drag-force shape as $b_{max}$ increases")
+    bmax_axis.legend(fontsize=8, title=r"$b_{max}/\lambda_S$")
 
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("bulk velocity $v_b$ (cm/s)")
-    ax.set_ylabel("relative error vs. finest tested resolution")
-    ax.set_title(
-        f"{condition_label}\nrelative error vs velocity (reference = finest tested resolution, n={hold_resolution})"
-    )
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend(fontsize=7, loc="best", ncol=2)
-    fig.tight_layout()
-    fig.savefig(OUTDIR / "condition_0_relative_error_vs_velocity.png", dpi=200)
+    for axis in axes.flat[:3]:
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.set_xlabel("bulk velocity $v_b$ (cm/s)")
+        axis.set_ylabel("relative error in drag force")
+        axis.grid(True, which="both", alpha=0.25)
+
+    bmax_axis.set_xscale("log")
+    bmax_axis.set_yscale("log")
+    bmax_axis.set_xlabel("bulk velocity $v_b$ (cm/s)")
+    bmax_axis.set_ylabel("drag force $F$ (N)")
+    bmax_axis.grid(True, which="both", alpha=0.25)
+
+    fig.suptitle(f"{condition_label}\nresolution convergence and bmax shape dependence (vectorized method)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(OUTDIR / "condition_0_convergence.png", dpi=200)
     plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resolutions", nargs="+", type=int, default=list(DEFAULT_RESOLUTIONS))
     parser.add_argument(
-        "--resolutions",
+        "--bmax-over-screening-length",
         nargs="+",
-        type=int,
-        default=list(DEFAULT_RESOLUTIONS),
-        help="Resolution values, applied to whichever of vres/rhores/dphires is being swept. "
-        "The two axes not being swept are held at the largest value in this list.",
+        type=float,
+        default=list(DEFAULT_BMAX_OVER_SCREENING_LENGTH),
+        help="bmax/lambda_S values; 1000 is required as the error reference.",
     )
     parser.add_argument("--n-velocities", type=int, default=DEFAULT_N_VELOCITIES)
     parser.add_argument("--velocity-min-cm-s", type=float, default=DEFAULT_VELOCITY_MIN_CM_S)
     parser.add_argument("--velocity-max-cm-s", type=float, default=DEFAULT_VELOCITY_MAX_CM_S)
-    parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument(
-        "--heartbeat-seconds",
-        type=float,
-        default=12.0,
-        help="Print a status line at least this often even if no task has finished yet.",
-    )
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument("--heartbeat-seconds", type=float, default=12.0)
     args = parser.parse_args()
 
-    resolutions = tuple(sorted(args.resolutions))
-    hold_resolution = max(resolutions)
-    velocities_cm_s = np.logspace(
-        math.log10(args.velocity_min_cm_s),
-        math.log10(args.velocity_max_cm_s),
-        args.n_velocities,
-    )
+    resolutions = tuple(sorted(set(args.resolutions)))
+    bmax_values = tuple(sorted(set(args.bmax_over_screening_length)))
+    if not resolutions or min(resolutions) < 1:
+        parser.error("--resolutions must contain positive integers")
+    if not bmax_values or min(bmax_values) <= 0.0 or BMAX_ERROR_REFERENCE not in bmax_values:
+        parser.error("--bmax-over-screening-length must contain positive values including 1000")
 
+    velocities_cm_s = np.logspace(math.log10(args.velocity_min_cm_s), math.log10(args.velocity_max_cm_s), args.n_velocities)
     tasks = [
-        (scan_type, resolution, hold_resolution, velocity_index, float(velocity_cm_s))
+        (scan_type, float(resolution), velocity_index, float(velocity_cm_s))
         for scan_type in SCAN_TYPES
         for resolution in resolutions
         for velocity_index, velocity_cm_s in enumerate(velocities_cm_s)
     ]
+    tasks.extend(
+        ("bmax_over_screening_length", bmax, velocity_index, float(velocity_cm_s))
+        for bmax in bmax_values
+        for velocity_index, velocity_cm_s in enumerate(velocities_cm_s)
+    )
 
     start = time.perf_counter()
     print(
-        f"Running {len(tasks)} force evaluations for condition {CONDITION} across "
-        f"{len(SCAN_TYPES)} scan types ({', '.join(SCAN_TYPES)}), {len(resolutions)} resolutions, "
-        f"{args.n_velocities} velocities on up to {args.workers} workers "
-        f"(method=vectorized only, no quad calls).",
+        f"Running {len(tasks)} force evaluations for condition {CONDITION}: {len(SCAN_TYPES)} resolution scans and "
+        f"{len(bmax_values)} bmax/lambda_S values on up to {args.workers} workers.",
         flush=True,
     )
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        rows = run_pool_with_heartbeat(
-            pool, tasks, compute_force_task, heartbeat_seconds=args.heartbeat_seconds, label="force_vs_velocity"
-        )
+        rows = run_pool_with_heartbeat(pool, tasks, compute_force_task, heartbeat_seconds=args.heartbeat_seconds, label="convergence")
 
-    rows.sort(key=lambda row: (row["scan_type"], row["resolution"], row["velocity_index"]))
-    add_relative_error(rows, hold_resolution)
-    write_csv(OUTDIR / "condition_0_resolution_scan.csv", rows)
-
-    reference_drag = FiniteLaunchDrag(CONDITION, method="vectorized")
-    condition_label = f"Condition {CONDITION} (T = {reference_drag.T:.0f} K, density = {reference_drag.gcc:.1e} g/cc)"
-
-    make_drag_force_plot(rows, resolutions, condition_label)
-    make_relative_error_plot(rows, resolutions, hold_resolution, condition_label)
-
-    print(
-        f"Wrote condition_0_drag_vs_velocity.png, condition_0_relative_error_vs_velocity.png, "
-        f"and condition_0_resolution_scan.csv to {OUTDIR}.",
-        flush=True,
-    )
-    print(f"Finished in {(time.perf_counter()-start):.1f}s.", flush=True)
+    rows.sort(key=lambda row: (str(row["test_type"]), float(row["test_value"]), int(row["velocity_index"])))
+    add_relative_errors(rows, resolutions, bmax_values)
+    write_csv(OUTDIR / "condition_0_convergence.csv", rows)
+    reference_drag = FiniteLaunchDrag(CONDITION, method="vectorized", **default_resolution())
+    label = f"Condition {CONDITION} (T = {reference_drag.T:.0f} K, density = {reference_drag.gcc:.1e} g/cc)"
+    make_convergence_figure(rows, resolutions, bmax_values, label)
+    print(f"Wrote condition_0_convergence.png and condition_0_convergence.csv to {OUTDIR}.", flush=True)
+    print(f"Finished in {(time.perf_counter() - start):.1f}s.", flush=True)
 
 
 if __name__ == "__main__":

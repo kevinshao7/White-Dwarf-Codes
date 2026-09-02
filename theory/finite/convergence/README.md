@@ -1,59 +1,33 @@
-# Resolution convergence
+# Finite-launch convergence
 
-Demonstrates how the predicted drag force from `FiniteLaunchDrag`
-(`theory/finite/finite_launch.py`, `method="vectorized"`) depends on each of
-its three independent resolution knobs, for condition 0 only.
-
-Depends only on `theory/finite/` and `theory/dragbase2.py` -- nothing under
-`theory/validation/`.
-
-## What it measures
-
-Three grids can each be refined independently:
-
-- `vres` -- midpoint rule over the relative-velocity Maxwellian inside `drag`.
-- `rhores` -- log-spaced midpoint rule over the impact parameter `b` inside
-  `impact_parameter_integral`.
-- `dphires` -- midpoint rule over the regularised scattering-angle integral
-  inside `orbit_angle`.
-
-The script sweeps each one individually while holding the other two fixed at
-the largest value in `--resolutions`, and evaluates `drag(vb)` (condition 0,
-`method="vectorized"` only -- no `scipy.integrate.quad` call anywhere in this
-script) across a log-spaced velocity grid for every `(scan type, resolution,
-velocity)` combination.
-
-Relative error is measured against each scan's own finest tested resolution
-(the largest value in `--resolutions`), not a separate quad-based ground
-truth -- that resolution's row is already part of the sweep, so no extra
-evaluations are needed.
+This directory contains the vectorized-quadrature convergence driver for
+`FiniteLaunchDrag`, condition 0.
 
 ## Run
 
 ```powershell
-python .\theory\finite\convergence\run_resolution_convergence.py --workers 8
+python .\theory\finite\convergence\run_resolution_convergence.py
 ```
 
-Runtime scales as `3 scan types * len(resolutions) * len(velocities)`
-`drag()` evaluations. With the defaults (4 resolutions, 16 velocities) this is
-192 evaluations, all `method="vectorized"` -- fast relative to the old
-quad-based version of this script.
+The driver defaults to 24 workers. It creates one 2-by-2 figure,
+`condition_0_convergence.png`, over a log-spaced bulk-velocity grid:
 
-## Outputs
+- velocity-resolution (`vres`) convergence;
+- impact-parameter-resolution (`rhores`) convergence;
+- scattering-angle-resolution (`dphires`) convergence;
+- the drag-force shape as the impact-parameter cutoff (`bmax`) changes.
 
-- `condition_0_resolution_scan.csv` -- one row per `(scan_type, resolution,
-  velocity)`: `vres`/`rhores`/`dphires` actually used, the drag force, and the
-  relative error vs. that scan's finest tested resolution.
-- `condition_0_drag_vs_velocity.png` -- drag force (N) vs. bulk velocity
-  (cm/s), log-log. Colour encodes scan type (blue = `vres`, orange =
-  `rhores`, purple = `dphires`); linestyle encodes resolution (dotted ->
-  dashed -> dashdot -> solid as resolution increases, so the finest tested
-  resolution in each scan is always the solid line).
-- `condition_0_relative_error_vs_velocity.png` -- same colour/linestyle
-  scheme, relative error (log scale) vs. the same velocity axis. The
-  reference resolution for each scan is omitted (its error is identically
-  zero, which can't be shown on a log axis).
+The production/default resolution is `vres=100`, `rhores=300`, and
+`dphires=300`. Each resolution scan varies only its named grid and holds the
+other two at those defaults. Its reference is the largest value in
+`--resolutions` (default: `1000`).
 
-Both plots title with condition 0's temperature and density, read directly
-off the `FiniteLaunchDrag` instance (`T`, `gcc`) so the label can't drift from
-`dragbase2.py`.
+The cutoff scan evaluates `bmax/lambda_S = 0.1, 1, 10, 100, 1000, 10000`.
+The fourth plot panel shows only the resulting drag-force shapes; the `1000`
+result remains the reference used to compute the relative errors of every
+other cutoff value (including `10000`) in the CSV. `bmax` is converted to the
+corresponding finite launch radius internally, since `FiniteLaunchDrag` sets
+the cutoff equal to that radius.
+
+`condition_0_convergence.csv` records each force evaluation, all actual
+resolution settings, the launch-radius scale, and its relative error.
