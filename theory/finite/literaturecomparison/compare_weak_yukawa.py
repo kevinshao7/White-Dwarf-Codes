@@ -35,7 +35,10 @@ if str(THEORY_DIR) not in sys.path:
 os.environ.setdefault("MPLCONFIGDIR", str(HERE / ".matplotlib"))
 
 from finite.finite_launch import FiniteLaunchDrag  # noqa: E402
-from literaturecomparison.weak_yukawa import (  # noqa: E402
+# This script is intentionally runnable by absolute path, without requiring
+# ``theory/finite`` to be installed as a package.  Python puts this script's
+# directory on sys.path in that case, so import its sibling directly.
+from weak_yukawa import (  # noqa: E402
     MODEL_LABELS,
     drag_force,
     generalized_coulomb_logarithm,
