@@ -1,11 +1,13 @@
 {
-  "created_utc": "2026-09-05T04:21:39.662013+00:00",
-  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
-  "numpy": "2.5.0",
-  "input_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\dataarchive\\nprun4_29",
+  "created_utc": "2026-09-07T16:06:09.203723+00:00",
+  "python": "3.11.13 (main, Jun  1 2026, 00:00:00) [GCC 11.5.0 20240719 (Red Hat 11.5.0-14)]",
+  "numpy": "2.0.2",
+  "input_dir": "/home/kevinsh/White-Dwarf-Codes/unforced/dataarchive/nprun4_29",
   "source": "raw",
-  "output_dir": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\theory\\dataprocessing\\output",
+  "output_dir": "/home/kevinsh/White-Dwarf-Codes/theory/dataprocessing/output",
   "configuration": {
+    "fit_start_peak_fraction": 0.999,
+    "fit_end_peak_fraction": 0.8,
     "minimum_tau_s": 1e-20,
     "max_optimizer_evaluations": 1000,
     "sigma_floor_fraction": 1e-06,
@@ -20,13 +22,13 @@
   "source_hashes": "computed",
   "raw_target_frames": 1000,
   "status_counts": {
-    "ok": 6,
-    "review": 22,
-    "ignored": 12,
-    "failed": 0
+    "ok": 0,
+    "review": 0,
+    "ignored": 1,
+    "failed": 39
   },
   "raw_source_audit": {
-    "path": "C:\\Users\\shaoq\\Documents\\White Dwarfs\\White Dwarf Codes\\unforced\\daisresults\\daisproduction",
+    "path": "/home/kevinsh/White-Dwarf-Codes/unforced/daisresults/daisproduction",
     "status": "incomplete",
     "file_count": 281,
     "trajectory_file_count": 0,
