@@ -28,7 +28,7 @@ log-spacing in velocity without assuming anything about how the source LAMMPS
 runs were organized.
 
 Depends only on `theory/finite/`, `theory/dragbase2.py`, and
-`theory/dataprocessing/output{,_dais}/results.npy` -- nothing under
+`theory/dataprocessing/output/fit_results.csv` -- nothing under
 `theory/validation/`.
 """
 
@@ -66,7 +66,6 @@ from dragbase2 import DragFourth  # noqa: E402
 
 CM_PER_S_TO_M_PER_S = 1.0e-2
 ALL_CONDITIONS = (0, 1, 2, 3)
-DAIS_CONDITIONS = (0, 2)
 # gccarr = [1e-5, 1, 1e-5, 1] in DragFourth: conditions 0 and 2 are the
 # weakly-coupled (low mass-density) cases, so only for those does the
 # electron Debye length set the relevant screening scale for b_max.
@@ -96,7 +95,8 @@ DEFAULT_VRES = 101
 # points' own velocity range for that condition -- denser than, but not
 # extrapolated beyond, the (typically much sparser) points the fit itself
 # used.
-DEFAULT_SMOOTH_CURVE_POINTS = 100
+DEFAULT_SMOOTH_CURVE_POINTS = 40
+MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION = 0.10
 
 
 @dataclass(frozen=True)
@@ -110,6 +110,13 @@ class DataPoint:
     source: str
 
 
+@dataclass(frozen=True)
+class FitCurve:
+    condition: int
+    velocity_cm_s: np.ndarray
+    acceleration_cm_s2: np.ndarray
+
+
 def positive_float(value: object) -> float:
     try:
         result = float(value)
@@ -120,13 +127,51 @@ def positive_float(value: object) -> float:
     return result
 
 
+def finite_float(value: object) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return math.nan
+    return result if np.isfinite(result) else math.nan
+
+
+def nonnegative_float(value: object) -> float:
+    result = finite_float(value)
+    return result if result >= 0.0 else math.nan
+
+
 def exp_velocity(time_s: np.ndarray, tau: float, amplitude: float) -> np.ndarray:
     return amplitude * np.exp(-time_s / tau)
 
 
-def load_expfit_points(results_path: Path, conditions: set[int], samples_per_fit: int) -> list[DataPoint]:
-    """Expand each LAMMPS exponential velocity-decay fit into synthetic
-    (velocity, acceleration) samples along its decay curve.
+def accepted_decay_model(row: dict[str, str]) -> str:
+    """Use power only for a material RMSE gain from a constrained fit."""
+    exp_rmse = positive_float(row.get("exponential_rmse"))
+    power_rmse = positive_float(row.get("power_rmse"))
+    alpha = finite_float(row.get("power_alpha"))
+    alpha_sigma = nonnegative_float(row.get("power_alpha_sigma"))
+    time_offset = positive_float(row.get("power_time_offset"))
+    time_offset_sigma = nonnegative_float(row.get("power_time_offset_sigma"))
+    n_points = finite_float(row.get("n_fit_points"))
+    power_well_constrained = (
+        all(np.isfinite(value) for value in (
+            power_rmse, alpha, alpha_sigma, time_offset, time_offset_sigma, n_points,
+        ))
+        and n_points >= 5
+        and alpha < 0.98
+        and time_offset_sigma / time_offset < 1.0
+    )
+    if (
+        power_well_constrained
+        and np.isfinite(exp_rmse)
+        and power_rmse < exp_rmse * (1.0 - MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION)
+    ):
+        return "power"
+    return "exponential"
+
+
+def load_legacy_expfit_points(results_path: Path, conditions: set[int]) -> list[DataPoint]:
+    """Represent each legacy exponential fit by its temporal midpoint.
 
     `results.npy` is shaped (condition, campaign, 6):
     [amplitude, amplitude_sigma, tau, tau_sigma, start_time, end_time], the
@@ -150,7 +195,7 @@ def load_expfit_points(results_path: Path, conditions: set[int], samples_per_fit
             if not all(np.isfinite(v) for v in (amplitude, amplitude_sigma, tau, tau_sigma, start_time, end_time)):
                 continue
 
-            times = np.linspace(start_time, end_time, samples_per_fit)
+            times = np.array([(start_time + end_time) / 2.0])
             velocities = exp_velocity(times, tau, amplitude)
             accelerations = velocities / tau
             velocity_sigma = np.sqrt(
@@ -182,15 +227,145 @@ def load_expfit_points(results_path: Path, conditions: set[int], samples_per_fit
     return points
 
 
-def load_all_points(lammps_results: Path, dais_results: Path, conditions: set[int], samples_per_fit: int) -> list[DataPoint]:
-    dais_conditions = conditions.intersection(DAIS_CONDITIONS)
-    lammps_conditions = conditions.difference(DAIS_CONDITIONS)
+def load_selected_fit_points(results_path: Path, conditions: set[int]) -> list[DataPoint]:
+    """Represent each lower-RMSE exponential or power fit by its midpoint.
+
+    The power fit is ``v = B*(t0-t)**p``, where ``p = -beta > 0`` and time is
+    elapsed from the fit-window start. Acceleration is the magnitude of dv/dt.
+    Reported parameter errors are propagated independently because the reducer
+    does not currently save the full parameter covariance matrices.
+    """
     points: list[DataPoint] = []
-    if lammps_conditions:
-        points.extend(load_expfit_points(lammps_results, lammps_conditions, samples_per_fit))
-    if dais_conditions:
-        points.extend(load_expfit_points(dais_results, dais_conditions, samples_per_fit))
+    with results_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    required = {"condition", "status", "best_model", "start_time", "end_time"}
+    if not rows or not required.issubset(rows[0]):
+        missing = sorted(required - (set(rows[0]) if rows else set()))
+        raise ValueError(f"fit-results CSV lacks required columns: {missing}")
+
+    for campaign_id, row in enumerate(rows):
+        condition = int(row["condition"])
+        if condition not in conditions or row["status"] not in {"ok", "review"}:
+            continue
+        start_time = finite_float(row["start_time"])
+        end_time = finite_float(row["end_time"])
+        duration = end_time - start_time
+        if not np.isfinite(duration) or duration <= 0.0:
+            continue
+        elapsed = np.array([duration / 2.0])
+        model = accepted_decay_model(row)
+
+        if model == "exponential":
+            amplitude = positive_float(row.get("exponential_amplitude"))
+            amplitude_sigma = nonnegative_float(row.get("exponential_amplitude_sigma"))
+            tau = positive_float(row.get("exponential_tau"))
+            tau_sigma = nonnegative_float(row.get("exponential_tau_sigma"))
+            if not all(np.isfinite(v) for v in (amplitude, amplitude_sigma, tau, tau_sigma)):
+                continue
+            velocities = exp_velocity(elapsed, tau, amplitude)
+            accelerations = velocities / tau
+            velocity_sigmas = np.sqrt(
+                np.square(velocities * amplitude_sigma / amplitude)
+                + np.square(elapsed * velocities * tau_sigma / np.square(tau))
+            )
+            acceleration_sigmas = accelerations * np.sqrt(
+                np.square(velocity_sigmas / velocities) + np.square(tau_sigma / tau)
+            )
+        elif model == "power":
+            amplitude = positive_float(row.get("power_amplitude_at_start"))
+            amplitude_sigma = nonnegative_float(row.get("power_amplitude_at_start_sigma"))
+            time_offset = positive_float(row.get("power_time_offset"))
+            time_offset_sigma = nonnegative_float(row.get("power_time_offset_sigma"))
+            beta = finite_float(row.get("power_beta"))
+            beta_sigma = nonnegative_float(row.get("power_beta_sigma"))
+            if not all(np.isfinite(v) for v in (amplitude, amplitude_sigma, time_offset, time_offset_sigma, beta, beta_sigma)) or beta >= 0.0 or time_offset <= duration:
+                continue
+            p = -beta
+            remaining = time_offset - elapsed
+            velocities = amplitude * np.power(remaining / time_offset, p)
+            accelerations = velocities * p / remaining
+            velocity_sigmas = velocities * np.sqrt(
+                np.square(amplitude_sigma / amplitude)
+                + np.square(p * (1.0 / remaining - 1.0 / time_offset) * time_offset_sigma)
+                + np.square(np.log(remaining / time_offset) * beta_sigma)
+            )
+            acceleration_sigmas = accelerations * np.sqrt(
+                np.square(amplitude_sigma / amplitude)
+                + np.square(((p - 1.0) / remaining - p / time_offset) * time_offset_sigma)
+                + np.square((1.0 / p + np.log(remaining / time_offset)) * beta_sigma)
+            )
+        else:
+            continue
+
+        source_file = row.get("source_file", f"row_{campaign_id}")
+        for sample_index, (velocity, acceleration, v_err, a_err) in enumerate(
+            zip(velocities, accelerations, velocity_sigmas, acceleration_sigmas)
+        ):
+            velocity = positive_float(velocity)
+            acceleration = positive_float(acceleration)
+            if not np.isfinite(velocity) or not np.isfinite(acceleration):
+                continue
+            points.append(DataPoint(
+                condition=condition,
+                velocity_cm_s=velocity,
+                acceleration_cm_s2=acceleration,
+                velocity_sigma_cm_s=nonnegative_float(abs(v_err)),
+                acceleration_sigma_cm_s2=nonnegative_float(abs(a_err)),
+                campaign_id=campaign_id,
+                source=f"{source_file}:{model}[{sample_index}]",
+            ))
     return points
+
+
+def load_all_points(results_path: Path, conditions: set[int]) -> list[DataPoint]:
+    """Load selected-fit CSV output, with legacy .npy support."""
+    if results_path.suffix.lower() == ".npy":
+        return load_legacy_expfit_points(results_path, conditions)
+    return load_selected_fit_points(results_path, conditions)
+
+
+def load_selected_fit_curves(
+    results_path: Path, conditions: set[int], samples_per_curve: int = 100,
+) -> list[FitCurve]:
+    """Reconstruct each campaign's winning LAMMPS MD fit for plotting only."""
+    if results_path.suffix.lower() != ".csv":
+        return []
+    curves: list[FitCurve] = []
+    with results_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        condition = int(row["condition"])
+        if condition not in conditions or row["status"] not in {"ok", "review"}:
+            continue
+        duration = finite_float(row["end_time"]) - finite_float(row["start_time"])
+        if not np.isfinite(duration) or duration <= 0.0:
+            continue
+        # Do not evaluate the power derivative at t=0, where it can be singular.
+        elapsed = np.linspace(duration / samples_per_curve, duration, samples_per_curve)
+        model = accepted_decay_model(row)
+        if model == "exponential":
+            amplitude = positive_float(row.get("exponential_amplitude"))
+            tau = positive_float(row.get("exponential_tau"))
+            if not np.isfinite(amplitude) or not np.isfinite(tau):
+                continue
+            velocity = exp_velocity(elapsed, tau, amplitude)
+            acceleration = velocity / tau
+        elif model == "power":
+            amplitude = positive_float(row.get("power_amplitude_at_start"))
+            time_offset = positive_float(row.get("power_time_offset"))
+            beta = finite_float(row.get("power_beta"))
+            if not all(np.isfinite(value) for value in (amplitude, time_offset, beta)) or beta >= 0.0 or time_offset <= duration:
+                continue
+            p = -beta
+            remaining = time_offset - elapsed
+            velocity = amplitude * np.power(remaining / time_offset, p)
+            acceleration = velocity * p / remaining
+        else:
+            continue
+        valid = np.isfinite(velocity) & np.isfinite(acceleration) & (velocity > 0.0) & (acceleration > 0.0)
+        if np.count_nonzero(valid) >= 2:
+            curves.append(FitCurve(condition, velocity[valid], acceleration[valid]))
+    return curves
 
 
 def filter_points(points: list[DataPoint], min_v: float, max_v: float, max_relative_sigma: float) -> list[DataPoint]:
@@ -543,12 +718,22 @@ def draw_overlay(
     summary: dict[str, object],
     prediction_rows: list[dict[str, object]],
     all_points: list[DataPoint],
+    lammps_fit_curves: list[FitCurve],
     smooth_curve: dict[str, np.ndarray] | None = None,
 ) -> None:
     """Draw one condition's b_max-fit overlay onto an existing axis."""
     all_v = np.array([p.velocity_cm_s for p in all_points if p.condition == condition])
     all_a = np.array([p.acceleration_cm_s2 for p in all_points if p.condition == condition])
     axis.scatter(all_v, all_a, s=8, color="lightgray", label="LAMMPS points (not fit)", zorder=1)
+
+    condition_curves = [curve for curve in lammps_fit_curves if curve.condition == condition]
+    for curve_index, curve in enumerate(condition_curves):
+        order = np.argsort(curve.velocity_cm_s)
+        axis.plot(
+            curve.velocity_cm_s[order], curve.acceleration_cm_s2[order],
+            color="0.65", linewidth=1.0, alpha=0.7, zorder=1.2,
+            label="LAMMPS MD best-fit curves" if curve_index == 0 else None,
+        )
 
     fit_v = np.array([row["velocity_cm_s"] for row in prediction_rows])
     fit_a = np.array([row["data_acceleration_cm_s2"] for row in prediction_rows])
@@ -596,6 +781,7 @@ def draw_overlay(
 def make_combined_overlay_plot(
     results: dict[int, tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]],
     all_points: list[DataPoint],
+    lammps_fit_curves: list[FitCurve],
 ) -> None:
     """One 2x2 figure with all 4 conditions' b_max-fit overlays as subplots.
 
@@ -609,7 +795,7 @@ def make_combined_overlay_plot(
         axis = axes[row, col]
         if condition in results:
             summary, prediction_rows, smooth_curve = results[condition]
-            draw_overlay(axis, condition, summary, prediction_rows, all_points, smooth_curve)
+            draw_overlay(axis, condition, summary, prediction_rows, all_points, lammps_fit_curves, smooth_curve)
         else:
             axis.axis("off")
     fig.suptitle("b_max fit vs LAMMPS ($r_i=a_H$ fixed)", fontsize=14)
@@ -629,12 +815,49 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def load_saved_bmax_plot_results(
+    summary_path: Path, predictions_path: Path,
+) -> dict[int, tuple[dict[str, object], list[dict[str, object]], dict[str, np.ndarray]]]:
+    """Load an already-completed b_max fit without any drag evaluations."""
+    if not summary_path.exists() or not predictions_path.exists():
+        raise FileNotFoundError("saved b_max summary/predictions are missing; rerun with --refit")
+    with summary_path.open(newline="", encoding="utf-8") as handle:
+        summaries = list(csv.DictReader(handle))
+    with predictions_path.open(newline="", encoding="utf-8") as handle:
+        predictions = list(csv.DictReader(handle))
+    results = {}
+    for saved_summary in summaries:
+        condition = int(saved_summary["condition"])
+        summary: dict[str, object] = {
+            key: (value if key in {"method", "converged", "at_upper_bound"} else finite_float(value))
+            for key, value in saved_summary.items()
+        }
+        rows: list[dict[str, object]] = []
+        for saved_row in predictions:
+            if int(saved_row["condition"]) != condition:
+                continue
+            rows.append({
+                key: value if key == "source" else finite_float(value)
+                for key, value in saved_row.items()
+            })
+        rows.sort(key=lambda row: float(row["velocity_cm_s"]))
+        smooth_curve = {
+            "velocity_cm_s": np.array([row["velocity_cm_s"] for row in rows], dtype=float),
+            "model_acceleration_cm_s2": np.array([row["model_acceleration_cm_s2"] for row in rows], dtype=float),
+        }
+        results[condition] = (summary, rows, smooth_curve)
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--conditions", nargs="+", type=int, default=list(ALL_CONDITIONS))
-    parser.add_argument("--lammps-results", type=Path, default=REPO_ROOT / "theory" / "dataprocessing" / "output" / "results.npy")
-    parser.add_argument("--dais-results", type=Path, default=REPO_ROOT / "theory" / "dataprocessing" / "output_dais" / "results.npy")
-    parser.add_argument("--samples-per-fit", type=int, default=20)
+    parser.add_argument(
+        "--lammps-results",
+        type=Path,
+        default=REPO_ROOT / "theory" / "dataprocessing" / "output" / "fit_results.csv",
+        help="Processed per-campaign fits; each run contributes its temporal midpoint.",
+    )
     parser.add_argument("--min-velocity-cm-s", type=float, default=1.0e2)
     parser.add_argument("--max-velocity-cm-s", type=float, default=1.0e8)
     parser.add_argument("--max-relative-sigma", type=float, default=0.5)
@@ -653,6 +876,10 @@ def main() -> None:
     )
     parser.add_argument("--max-nfev", type=int, default=30)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--refit", action="store_true",
+        help="Recompute b_max. By default, quickly redraw using the saved summary and predictions.",
+    )
     parser.add_argument(
         "--gpu-devices",
         type=str,
@@ -676,12 +903,12 @@ def main() -> None:
 
     if not args.lammps_results.exists():
         parser.error(f"--lammps-results not found: {args.lammps_results}")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
 
     conditions = set(args.conditions)
-    if conditions.intersection(DAIS_CONDITIONS) and not args.dais_results.exists():
-        parser.error(f"--dais-results not found: {args.dais_results}")
-
-    all_points = load_all_points(args.lammps_results, args.dais_results, conditions, args.samples_per_fit)
+    all_points = load_all_points(args.lammps_results, conditions)
+    lammps_fit_curves = load_selected_fit_curves(args.lammps_results, conditions)
     filtered = filter_points(all_points, args.min_velocity_cm_s, args.max_velocity_cm_s, args.max_relative_sigma)
     fit_points = select_fit_points(filtered, args.points_per_condition)
     print(
@@ -689,6 +916,21 @@ def main() -> None:
         f"{len(fit_points)} selected for fitting across conditions {sorted(conditions)}.",
         flush=True,
     )
+
+    if not args.refit:
+        try:
+            plot_results = load_saved_bmax_plot_results(
+                OUTDIR / "bmax_fit_summary.csv", OUTDIR / "bmax_fit_predictions.csv",
+            )
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+        make_combined_overlay_plot(plot_results, all_points, lammps_fit_curves)
+        print(
+            f"Redrew saved b_max fit with {len(lammps_fit_curves)} gray LAMMPS MD fit curves; "
+            "no optimization or drag evaluation was run.",
+            flush=True,
+        )
+        return
 
     start = time.perf_counter()
     summaries: list[dict[str, object]] = []
@@ -735,7 +977,7 @@ def main() -> None:
 
     write_csv(OUTDIR / "bmax_fit_summary.csv", summaries)
     write_csv(OUTDIR / "bmax_fit_predictions.csv", all_prediction_rows)
-    make_combined_overlay_plot(plot_results, all_points)
+    make_combined_overlay_plot(plot_results, all_points, lammps_fit_curves)
     print(f"Finished in {(time.perf_counter()-start)/60:.1f} min.", flush=True)
 
 

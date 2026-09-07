@@ -32,7 +32,6 @@ from bmax_resolution_scaling import scaled_resolution_for_bmax
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ALL_CONDITIONS = (0, 1, 2, 3)
-DAIS_CONDITIONS = (0, 2)
 STRONGLY_COUPLED_CONDITIONS = (1, 3)
 FIT_CONDITIONS = ALL_CONDITIONS
 COUPLING_PARAMETER = {0: 0.03, 1: 1.94, 2: 0.42, 3: 1.05}
@@ -115,23 +114,15 @@ def load_lammps_expfit_points(results_path: Path, conditions: set[int], samples_
 
 
 def load_default_points(
-    lammps_results_path: Path,
-    dais_results_path: Path,
+    results_path: Path,
     conditions: set[int],
     samples_per_fit: int,
 ) -> list[DataPoint]:
-    dais_conditions = conditions.intersection(DAIS_CONDITIONS)
-    lammps_conditions = conditions.difference(DAIS_CONDITIONS)
-    points: list[DataPoint] = []
-    if lammps_conditions:
-        points.extend(load_lammps_expfit_points(lammps_results_path, lammps_conditions, samples_per_fit))
-    if dais_conditions:
-        points.extend(load_lammps_expfit_points(dais_results_path, dais_conditions, samples_per_fit))
-    return points
+    return load_lammps_expfit_points(results_path, conditions, samples_per_fit)
 
 
 def default_data_source_label(args: argparse.Namespace) -> str:
-    return f"lammps={args.lammps_results}; dais={args.dais_results}"
+    return str(args.lammps_results)
 
 
 def load_points_from_csv(path: Path, conditions: set[int]) -> list[DataPoint]:
@@ -802,7 +793,7 @@ def main() -> None:
         type=int,
         default=list(FIT_CONDITIONS),
         choices=FIT_CONDITIONS,
-        help="Conditions to fit. Cases 0 and 2 are loaded from --dais-results by default.",
+        help="Conditions to fit from the shared processed-results array.",
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
@@ -826,15 +817,9 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "theory" / "dataprocessing" / "output" / "results.npy",
         help=(
-            "Velocity-decay fit array shaped (condition, campaign, 6) for non-DAIS conditions. "
-            "Defaults to the reliability-filtered output from theory/dataprocessing/output."
+            "Velocity-decay fit array shaped (condition, campaign, 6) for all conditions. "
+            "Defaults to theory/dataprocessing/output/results.npy."
         ),
-    )
-    parser.add_argument(
-        "--dais-results",
-        type=Path,
-        default=REPO_ROOT / "theory" / "dataprocessing" / "output_dais" / "results.npy",
-        help="Velocity-decay fit array for DAIS conditions 0 and 2.",
     )
     parser.add_argument("--samples-per-lammps-fit", type=int, default=10)
     parser.add_argument(
@@ -871,7 +856,6 @@ def main() -> None:
     else:
         all_points = load_default_points(
             args.lammps_results,
-            args.dais_results,
             requested_conditions,
             args.samples_per_lammps_fit,
         )
