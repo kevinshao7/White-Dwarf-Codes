@@ -1,13 +1,8 @@
-r"""RUN FROM THE REPOSITORY ROOT WITH 8 CPU CORES:
-
-python .\\theory\\dataprocessing\\process_unforced.py --workers 8
-
-Reliable reduction of the DAIS production unforced LAMMPS velocity-decay campaign.
-
-This replaces the stateful fitting cells in ``datareduction.ipynb``.  The
-input ``force_*.np`` files contain one row per saved time and one column per
-Si atom, followed by the physical time in the final column.
-"""
+# Run from the repository root with eight CPU cores:
+# python ./theory/dataprocessing/process_unforced.py --workers 8
+#
+# Reliable reduction of the DAIS production unforced LAMMPS velocity-decay
+# campaign. This replaces the stateful fitting cells in datareduction.ipynb.
 
 from __future__ import annotations
 
@@ -853,7 +848,9 @@ def audit_nominal_raw_dir(path: Path | None) -> dict[str, object]:
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Reduce the DAIS production unforced LAMMPS velocity-decay campaign."
+    )
     parser.add_argument("--input-dir", type=Path, default=repo_root / "unforced/dataarchive/nprun4_29")
     parser.add_argument(
         "--raw-dir",
@@ -892,6 +889,7 @@ def main() -> None:
         help="For raw dumps, parse this many early-time-weighted snapshots; 0 parses all.",
     )
     args = parser.parse_args()
+    run_start_time = perf_counter()
 
     if args.max_optimizer_evaluations < 1:
         raise SystemExit("--max-optimizer-evaluations must be at least 1")
@@ -903,7 +901,9 @@ def main() -> None:
     config = FitConfig(
         max_optimizer_evaluations=args.max_optimizer_evaluations,
     )
+    print("Discovering input campaigns...", flush=True)
     inputs = discover_raw_inputs(args.raw_dir) if args.source == "raw" else discover_inputs(args.input_dir)
+    discovered_input_count = len(inputs)
     if args.condition is not None:
         inputs = [item for item in inputs if item[2] == args.condition]
     if args.velocity is not None and inputs:
@@ -917,6 +917,14 @@ def main() -> None:
         raise SystemExit(f"No {input_pattern} inputs found in {searched_dir}")
     if args.workers < 1:
         raise SystemExit("--workers must be at least 1")
+
+    print(
+        f"Configuration: source={args.source}, workers={args.workers}, "
+        f"target_frames={args.raw_target_frames}, plots={not args.no_plots}, "
+        f"hashes={not args.no_hash}",
+        flush=True,
+    )
+    print(f"Selected {len(inputs)} of {discovered_input_count} discovered campaigns", flush=True)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir = args.output_dir / "diagnostics"
@@ -968,11 +976,14 @@ def main() -> None:
                 )
     rows.sort(key=lambda item: (item.condition, item.nominal_velocity_cm_s))
 
+    print("Writing fit_results.csv...", flush=True)
     write_csv(args.output_dir / "fit_results.csv", rows)
     if not args.no_plots:
+        print("Writing diagnostic index...", flush=True)
         write_diagnostic_index(diagnostics_dir / "index.html", rows, plot_names)
     all_discovered = discover_raw_inputs(args.raw_dir) if args.source == "raw" else discover_inputs(args.input_dir)
     unique_velocities = np.array(sorted({velocity for _, velocity, _ in all_discovered}))
+    print("Writing compatible results.npy...", flush=True)
     write_compatible_results(args.output_dir / "results.npy", rows, unique_velocities)
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -994,8 +1005,10 @@ def main() -> None:
         "raw_source_audit": audit_nominal_raw_dir(args.raw_dir),
         "compatible_results_note": "Missing/failed entries are NaN, not the legacy -1 sentinel.",
     }
+    print("Writing manifest.json...", flush=True)
     (args.output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest["status_counts"], indent=2))
+    print(f"Completed in {perf_counter() - run_start_time:.1f}s", flush=True)
 
 
 if __name__ == "__main__":
