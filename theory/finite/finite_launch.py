@@ -388,7 +388,10 @@ class FiniteLaunchDrag(DragFourth):
 
     def momentum_transfer_factor(self, b, speed: float, energy: float):
         """``1 - cos(theta)``, the fraction of ``mu v_rel`` transferred."""
-        return 1.0 - np.cos(self.scattering_angle(b, speed, energy))
+        theta = self.scattering_angle(b, speed, energy)
+        # Use the half-angle identity to avoid catastrophic cancellation when
+        # theta is tiny in the large-b, high-velocity tail.
+        return 2.0 * np.square(np.sin(0.5 * theta))
 
     # ------------------------------------------------------------------
     # impact-parameter integral
