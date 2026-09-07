@@ -1,4 +1,4 @@
-"""RUN FROM THE REPOSITORY ROOT WITH 8 CPU CORES:
+r"""RUN FROM THE REPOSITORY ROOT WITH 8 CPU CORES:
 
 python .\\theory\\dataprocessing\\process_unforced.py --workers 8
 
