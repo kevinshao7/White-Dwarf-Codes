@@ -10,6 +10,11 @@ unforced/run7_28/
 *.npy
 deprecateed/
 *diagnostics*
+# Reducer diagnostics are reproducible, potentially numerous fit graphs.
+# Keep the compact parameter table below versioned as the downstream input.
+/theory/dataprocessing/output/diagnostics/
+/theory/dataprocessing/output/*.png
+!/theory/dataprocessing/output/fit_results.csv
 *daisoconvergencesweepresults*
 # Processed LAMMPS drag-fit results consumed by theory/finite/lammps_fit/
 # fit_bmax_to_lammps.py -- small (~2KB), tracked despite the blanket *.npy

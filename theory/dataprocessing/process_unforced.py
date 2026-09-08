@@ -32,7 +32,12 @@ RESULT_FIELDS = ("amplitude", "amplitude_sigma", "tau", "tau_sigma", "start_time
 
 @dataclass(frozen=True)
 class FitConfig:
-    fit_start_peak_fraction: float = 0.999
+    # Start at the post-peak maximum by default.  Requiring an arbitrary
+    # 0.1% drop before a fit discarded the slowest condition-0/2 trajectories
+    # even when their full available evolution can still constrain a slope.
+    # The endpoint uncertainty and interval-overlap checks below remain the
+    # safeguards against fitting an unidentifiable flat trace.
+    fit_start_peak_fraction: float = 1.0
     fit_end_peak_fraction: float = 0.80
     minimum_tau_s: float = 1.0e-20
     max_optimizer_evaluations: int = 1000
@@ -69,6 +74,8 @@ class FitResult:
     reduced_chi2: float = math.nan
     r_squared: float = math.nan
     residual_lag1_correlation: float = math.nan
+    residual_fft_first_zero_correlation_time_s: float = math.nan
+    residual_fft_first_zero_lag_samples: float = math.nan
     exponential_amplitude: float = math.nan
     exponential_amplitude_sigma: float = math.nan
     exponential_tau: float = math.nan
@@ -325,6 +332,56 @@ def intervals_overlap(mean_a: float, sem_a: float, mean_b: float, sem_b: float) 
     return max(mean_a - sem_a, mean_b - sem_b) <= min(mean_a + sem_a, mean_b + sem_b)
 
 
+def residual_first_zero_correlation_time_fft(
+    times: np.ndarray, residuals: np.ndarray,
+) -> tuple[float, float]:
+    """Estimate a residual correlation time from the first FFT-ACF zero.
+
+    The raw-dump reader deliberately retains early snapshots more densely, so
+    its times are not generally uniformly spaced.  Residuals are therefore
+    linearly interpolated onto an equally spaced grid before applying the
+    Wiener--Khinchin FFT autocorrelation calculation.  The returned time is
+    linearly interpolated between the adjacent ACF samples that straddle zero;
+    both return values are NaN when a meaningful first zero is unavailable.
+
+    This is a diagnostic correlation scale, not an uncertainty correction by
+    itself: the decay trajectory is nonstationary and the residual series is
+    short for some campaigns.
+    """
+    valid = np.isfinite(times) & np.isfinite(residuals)
+    time = np.asarray(times[valid], dtype=np.float64)
+    residual = np.asarray(residuals[valid], dtype=np.float64)
+    if len(time) < 4 or np.any(np.diff(time) <= 0.0):
+        return math.nan, math.nan
+    duration = float(time[-1] - time[0])
+    if not np.isfinite(duration) or duration <= 0.0:
+        return math.nan, math.nan
+    uniform_time = np.linspace(time[0], time[-1], len(time))
+    uniform_residual = np.interp(uniform_time, time, residual)
+    uniform_residual -= np.mean(uniform_residual)
+    variance = float(np.mean(np.square(uniform_residual)))
+    if not np.isfinite(variance) or variance <= np.finfo(float).tiny:
+        return math.nan, math.nan
+
+    # Zero-pad so that the first ``n`` entries represent the linear rather
+    # than circular autocovariance at non-negative lags.
+    n_samples = len(uniform_residual)
+    n_fft = 1 << (2 * n_samples - 1).bit_length()
+    spectrum = np.fft.rfft(uniform_residual, n=n_fft)
+    autocovariance = np.fft.irfft(np.abs(spectrum) ** 2, n=n_fft)[:n_samples]
+    autocorrelation = autocovariance / autocovariance[0]
+    crossings = np.flatnonzero(autocorrelation[1:] <= 0.0)
+    if crossings.size == 0:
+        return math.nan, math.nan
+    right = int(crossings[0] + 1)
+    left = right - 1
+    left_value, right_value = autocorrelation[left], autocorrelation[right]
+    fraction = left_value / (left_value - right_value) if left_value != right_value else 0.0
+    lag_samples = left + fraction
+    sample_spacing = duration / (n_samples - 1)
+    return float(lag_samples * sample_spacing), float(lag_samples)
+
+
 def exp_model(time: np.ndarray, log_amplitude: float, log_tau: float) -> np.ndarray:
     return np.exp(log_amplitude - time / np.exp(log_tau))
 
@@ -367,8 +424,8 @@ def fit_decay(
         return result
 
     # Locate the peak over the complete trajectory, then fit its descending branch from
-    # the first sample at or below 99.9% of the peak through the first sample at
-    # or below 80%.  If 80% is never reached, fit through the final sample.
+    # the first sample at or below the configurable start fraction through the first
+    # sample at or below 80%.  If 80% is never reached, fit through the final sample.
     peak_index = int(np.argmax(mean))
     peak_velocity = float(mean[peak_index])
     peak_time = float(times[peak_index])
@@ -386,8 +443,9 @@ def fit_decay(
     )
     if start_crossings.size == 0:
         result.status = "ignored"
-        result.quality_flags = "never_reaches_99_9_percent_of_peak"
-        result.message = "trajectory never decays to 99.9% of its peak"
+        start_percent = 100.0 * config.fit_start_peak_fraction
+        result.quality_flags = "never_reaches_fit_start_fraction_of_peak"
+        result.message = f"trajectory never reaches {start_percent:.6g}% of its peak"
         return result
     fit_start = peak_index + int(start_crossings[0])
     end_crossings = np.flatnonzero(
@@ -399,7 +457,7 @@ def fit_decay(
     result.end_index_exclusive = maximum_fit_end
     if fit_start >= maximum_fit_end - 2:
         result.status = "ignored"
-        result.quality_flags = "too_few_rows_between_99_9_and_80_percent_of_peak"
+        result.quality_flags = "too_few_rows_in_peak_fraction_fit_window"
         result.message = "peak-threshold fit window contains fewer than three observations"
         return result
 
@@ -439,7 +497,8 @@ def fit_decay(
     sigma_floor = config.sigma_floor_fraction * max(abs(result.initial_mean_velocity), 1.0)
     try:
         print(
-            f"  fitting {source.name}: fixed 99.9%-to-80%-of-peak window "
+            f"  fitting {source.name}: {100.0 * config.fit_start_peak_fraction:.6g}%-to-"
+            f"{100.0 * config.fit_end_peak_fraction:.6g}%-of-peak window "
             f"({maximum_fit_end - fit_start} samples)",
             flush=True,
         )
@@ -560,6 +619,9 @@ def fit_decay(
             if len(selected_raw) >= 3 and np.std(selected_raw) > 0
             else math.nan
         )
+        residual_correlation_time, residual_correlation_lag = residual_first_zero_correlation_time_fft(
+            fit_time, selected_raw,
+        )
 
         flags = []
         if not selected_fit.success:
@@ -611,6 +673,8 @@ def fit_decay(
         result.reduced_chi2 = selected_reduced_chi2
         result.r_squared = selected_r2
         result.residual_lag1_correlation = lag1
+        result.residual_fft_first_zero_correlation_time_s = residual_correlation_time
+        result.residual_fft_first_zero_lag_samples = residual_correlation_lag
         result.quality_flags = ";".join(sorted(set(flags)))
         result.status = "ok" if not flags else "review"
         result.message = f"exponential: {exp_fit.message}; power: {power_fit.message}"
@@ -874,6 +938,15 @@ def main() -> None:
         help="Maximum least-squares function evaluations for each fixed fit window (default: 1000).",
     )
     parser.add_argument(
+        "--fit-start-peak-fraction",
+        type=float,
+        default=FitConfig.fit_start_peak_fraction,
+        help=(
+            "Start fitting at the first descending sample at or below this fraction of the peak "
+            "(default: 1.0, i.e. the peak itself; use 0.999 to require a 0.1%% drop)."
+        ),
+    )
+    parser.add_argument(
         "--progress-interval",
         type=int,
         default=500,
@@ -895,6 +968,8 @@ def main() -> None:
 
     if args.max_optimizer_evaluations < 1:
         raise SystemExit("--max-optimizer-evaluations must be at least 1")
+    if not 0.0 < args.fit_start_peak_fraction <= 1.0:
+        raise SystemExit("--fit-start-peak-fraction must be in (0, 1]")
     if args.progress_interval < 0:
         raise SystemExit("--progress-interval must be nonnegative")
     if args.raw_target_frames < 0:
@@ -902,6 +977,7 @@ def main() -> None:
 
     config = FitConfig(
         max_optimizer_evaluations=args.max_optimizer_evaluations,
+        fit_start_peak_fraction=args.fit_start_peak_fraction,
     )
     print("Discovering input campaigns...", flush=True)
     inputs = discover_raw_inputs(args.raw_dir) if args.source == "raw" else discover_inputs(args.input_dir)
