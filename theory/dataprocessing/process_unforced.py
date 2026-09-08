@@ -40,7 +40,9 @@ class FitConfig:
     max_relative_tau_sigma: float = 1.0
     max_reduced_chi2: float = 100.0
     min_r_squared: float = 0.5
-    minimum_power_rmse_improvement_fraction: float = 0.10
+    # Exponential is the simpler default.  The extra flexibility of the
+    # power-law fit must reduce RMSE by more than 20% before it is selected.
+    minimum_power_rmse_improvement_fraction: float = 0.20
 
 
 @dataclass

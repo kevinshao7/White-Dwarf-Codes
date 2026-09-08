@@ -20,12 +20,9 @@ cannot reach the data (the model saturates as `r_i -> infinity`, since the
 Yukawa screening kills the contribution from very large impact parameters),
 not a bug -- report it, don't hide it.
 
-Point selection is likewise simplified from the old script's per-campaign
-regex grouping: points are ranked by velocity, split into
-`--points-per-condition` roughly-equal quantile groups, and the
-lowest-relative-sigma point is kept from each group. This approximates
-log-spacing in velocity without assuming anything about how the source LAMMPS
-runs were organized.
+Every valid campaign midpoint is fitted by default.  An optional
+`--points-per-condition` cap can reduce the data to velocity-quantile groups
+when a deliberately sparse fit is wanted; it is never applied implicitly.
 
 Depends only on `theory/finite/`, `theory/dragbase2.py`, and
 `theory/dataprocessing/output/fit_results.csv` -- nothing under
@@ -78,7 +75,6 @@ DEFAULT_BMAX_MIN = 1.0e-2
 # this upper bound.
 DEFAULT_BMAX_MAX = math.inf
 CONDITION_SUBPLOT_POSITION = {0: (0, 0), 1: (0, 1), 2: (1, 0), 3: (1, 1)}
-DEFAULT_POINTS_PER_CONDITION = 8
 # rhores = dphires = 360 keeps the 'vectorized' scheme within ~9e-4 relative
 # error of the quad_quad reference (worst case 8.7e-4) across the conditions
 # and speeds in theory/finite/convergence/resolution_convergence.csv -- the
@@ -96,7 +92,9 @@ DEFAULT_VRES = 101
 # extrapolated beyond, the (typically much sparser) points the fit itself
 # used.
 DEFAULT_SMOOTH_CURVE_POINTS = 40
-MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION = 0.10
+# Legacy-CSV fallback only.  Current CSVs carry ``best_model`` from
+# process_unforced.py, whose default policy uses the same 20% margin.
+MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION = 0.20
 
 
 @dataclass(frozen=True)
@@ -145,7 +143,21 @@ def exp_velocity(time_s: np.ndarray, tau: float, amplitude: float) -> np.ndarray
 
 
 def accepted_decay_model(row: dict[str, str]) -> str:
-    """Use power only for a material RMSE gain from a constrained fit."""
+    """Select this fit's decay model using the 20% power-improvement rule.
+
+    The stored ``best_model`` proves a recorded power fit already passed the
+    processor's convergence and parameter-constraint checks.  This consumer
+    deliberately imposes its stricter 20% RMSE requirement as well, so a
+    pre-existing CSV produced under the older 10% policy cannot silently
+    recreate the old b_max plot.  Exponential remains the default.
+    """
+    recorded_model = row.get("best_model", "").strip().lower()
+    if recorded_model == "exponential":
+        return recorded_model
+
+    # Backward compatibility for result CSVs made before ``best_model`` was
+    # written.  The numerical checks below are also used to apply the stricter
+    # policy to a power fit recorded by an older processor version.
     exp_rmse = positive_float(row.get("exponential_rmse"))
     power_rmse = positive_float(row.get("power_rmse"))
     alpha = finite_float(row.get("power_alpha"))
@@ -161,6 +173,16 @@ def accepted_decay_model(row: dict[str, str]) -> str:
         and alpha < 0.98
         and time_offset_sigma / time_offset < 1.0
     )
+    if recorded_model == "power":
+        # Trust the producer's recorded validity/convergence decision, but
+        # require the current, stricter RMSE margin.
+        return (
+            "power"
+            if np.isfinite(exp_rmse)
+            and np.isfinite(power_rmse)
+            and power_rmse < exp_rmse * (1.0 - MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION)
+            else "exponential"
+        )
     if (
         power_well_constrained
         and np.isfinite(exp_rmse)
@@ -386,14 +408,15 @@ def relative_sigma(point: DataPoint) -> float:
     return point.acceleration_sigma_cm_s2 / point.acceleration_cm_s2
 
 
-def select_fit_points(points: list[DataPoint], points_per_condition: int) -> list[DataPoint]:
-    """Rank by velocity, split into `points_per_condition` quantile groups,
-    keep the lowest-relative-sigma point from each group.
+def select_fit_points(points: list[DataPoint], points_per_condition: int | None) -> list[DataPoint]:
+    """Optionally reduce points to one precise sample per velocity quantile.
 
-    Approximates "log-spaced in velocity, most precise available" without
-    assuming anything about how the source LAMMPS campaigns were organized
-    (contrast the old script's regex-parsed per-campaign grouping).
+    ``None`` keeps every point, which is the default for a statistical fit.
+    A positive cap approximates log-spaced sampling without assuming campaign
+    naming conventions.
     """
+    if points_per_condition is None:
+        return list(points)
     selected: list[DataPoint] = []
     for condition in sorted({point.condition for point in points}):
         group = sorted((p for p in points if p.condition == condition), key=lambda p: p.velocity_cm_s)
@@ -861,7 +884,15 @@ def main() -> None:
     parser.add_argument("--min-velocity-cm-s", type=float, default=1.0e2)
     parser.add_argument("--max-velocity-cm-s", type=float, default=1.0e8)
     parser.add_argument("--max-relative-sigma", type=float, default=0.5)
-    parser.add_argument("--points-per-condition", type=int, default=DEFAULT_POINTS_PER_CONDITION)
+    parser.add_argument(
+        "--points-per-condition",
+        type=int,
+        default=None,
+        help=(
+            "Optional maximum number of velocity-quantile fit points per condition. "
+            "By default every valid filtered campaign point is fitted."
+        ),
+    )
     parser.add_argument("--bmax-min", type=float, default=DEFAULT_BMAX_MIN)
     parser.add_argument("--method", choices=("quad_quad", "vectorized"), default="vectorized")
     parser.add_argument("--resolution", type=int, default=DEFAULT_RESOLUTION, help="rhores = dphires used for every drag evaluation during the fit")
@@ -905,6 +936,8 @@ def main() -> None:
         parser.error(f"--lammps-results not found: {args.lammps_results}")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
+    if args.points_per_condition is not None and args.points_per_condition < 1:
+        parser.error("--points-per-condition must be at least 1")
 
     conditions = set(args.conditions)
     all_points = load_all_points(args.lammps_results, conditions)
@@ -924,6 +957,19 @@ def main() -> None:
             )
         except FileNotFoundError as exc:
             parser.error(str(exc))
+        expected_sources = {(point.condition, point.source) for point in fit_points}
+        saved_sources = {
+            (condition, str(row["source"]))
+            for condition, (_, prediction_rows, _) in plot_results.items()
+            for row in prediction_rows
+        }
+        if saved_sources != expected_sources:
+            missing = len(expected_sources - saved_sources)
+            extra = len(saved_sources - expected_sources)
+            parser.error(
+                "saved b_max predictions do not match the current selected LAMMPS fit points "
+                f"({missing} missing, {extra} obsolete); rerun with --refit"
+            )
         make_combined_overlay_plot(plot_results, all_points, lammps_fit_curves)
         print(
             f"Redrew saved b_max fit with {len(lammps_fit_curves)} gray LAMMPS MD fit curves; "
