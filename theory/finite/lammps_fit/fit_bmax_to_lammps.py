@@ -92,6 +92,10 @@ DEFAULT_VRES = 101
 # extrapolated beyond, the (typically much sparser) points the fit itself
 # used.
 DEFAULT_SMOOTH_CURVE_POINTS = 40
+# Correlation-aware uncertainty inflation should down-weight a noisy campaign,
+# not make it disappear from an otherwise all-data fit.  Users can still set a
+# finite CLI threshold for deliberate quality exclusion.
+DEFAULT_MAX_RELATIVE_SIGMA = math.inf
 # Legacy-CSV fallback only.  Current CSVs carry ``best_model`` from
 # process_unforced.py, whose default policy uses the same 20% margin.
 MINIMUM_POWER_RMSE_IMPROVEMENT_FRACTION = 0.20
@@ -136,6 +140,47 @@ def finite_float(value: object) -> float:
 def nonnegative_float(value: object) -> float:
     result = finite_float(value)
     return result if result >= 0.0 else math.nan
+
+
+def correlation_parameter_sigma_scale(row: dict[str, str], duration_s: float) -> float:
+    """Return the one-sigma parameter-error scale implied by residual ACF.
+
+    New reducer outputs already multiply their covariance by the recorded
+    ``residual_covariance_inflation`` and must not be adjusted again.  Older
+    CSVs contain the first-zero residual correlation time but predate that
+    covariance correction, so apply sqrt(N_raw/N_eff) here before propagating
+    their parameter errors into the b_max data-point uncertainty.
+    """
+    recorded_inflation = finite_float(row.get("residual_covariance_inflation"))
+    if np.isfinite(recorded_inflation) and recorded_inflation >= 1.0:
+        return 1.0
+    n_raw = finite_float(row.get("n_fit_points"))
+    correlation_time = positive_float(row.get("residual_fft_first_zero_correlation_time_s"))
+    if not (np.isfinite(n_raw) and n_raw >= 1.0 and np.isfinite(correlation_time) and duration_s > 0.0):
+        return 1.0
+    n_effective = min(n_raw, max(1.0, duration_s / correlation_time))
+    return math.sqrt(n_raw / n_effective)
+
+
+def covariance_from_row(row: dict[str, str], fields: tuple[str, ...]) -> np.ndarray | None:
+    """Load a symmetric covariance matrix saved by the reducer, if present."""
+    values = [finite_float(row.get(field)) for field in fields]
+    if not all(np.isfinite(value) for value in values):
+        return None
+    if len(fields) == 3:
+        covariance = np.array([[values[0], values[1]], [values[1], values[2]]], dtype=float)
+    elif len(fields) == 6:
+        covariance = np.array(
+            [[values[0], values[1], values[2]], [values[1], values[3], values[4]], [values[2], values[4], values[5]]],
+            dtype=float,
+        )
+    else:
+        raise ValueError("unsupported packed covariance size")
+    # Small negative eigenvalues can arise from CSV round-off; genuinely
+    # indefinite matrices are invalid and use the legacy diagonal fallback.
+    if np.min(np.linalg.eigvalsh(covariance)) < -1.0e-12 * max(1.0, float(np.max(np.abs(covariance)))):
+        return None
+    return covariance
 
 
 def exp_velocity(time_s: np.ndarray, tau: float, amplitude: float) -> np.ndarray:
@@ -276,46 +321,90 @@ def load_selected_fit_points(results_path: Path, conditions: set[int]) -> list[D
             continue
         elapsed = np.array([duration / 2.0])
         model = accepted_decay_model(row)
+        sigma_scale = correlation_parameter_sigma_scale(row, duration)
 
         if model == "exponential":
             amplitude = positive_float(row.get("exponential_amplitude"))
-            amplitude_sigma = nonnegative_float(row.get("exponential_amplitude_sigma"))
+            amplitude_sigma = nonnegative_float(row.get("exponential_amplitude_sigma")) * sigma_scale
             tau = positive_float(row.get("exponential_tau"))
-            tau_sigma = nonnegative_float(row.get("exponential_tau_sigma"))
+            tau_sigma = nonnegative_float(row.get("exponential_tau_sigma")) * sigma_scale
             if not all(np.isfinite(v) for v in (amplitude, amplitude_sigma, tau, tau_sigma)):
                 continue
             velocities = exp_velocity(elapsed, tau, amplitude)
             accelerations = velocities / tau
-            velocity_sigmas = np.sqrt(
-                np.square(velocities * amplitude_sigma / amplitude)
-                + np.square(elapsed * velocities * tau_sigma / np.square(tau))
-            )
-            acceleration_sigmas = accelerations * np.sqrt(
-                np.square(velocity_sigmas / velocities) + np.square(tau_sigma / tau)
-            )
+            covariance = covariance_from_row(row, (
+                "exponential_cov_log_amplitude_log_amplitude",
+                "exponential_cov_log_amplitude_log_tau",
+                "exponential_cov_log_tau_log_tau",
+            ))
+            if covariance is not None:
+                log_velocity_gradient = np.column_stack((np.ones_like(elapsed), elapsed / tau))
+                log_acceleration_gradient = np.column_stack((np.ones_like(elapsed), elapsed / tau - 1.0))
+                velocity_sigmas = velocities * np.sqrt(np.maximum(
+                    np.einsum("ij,jk,ik->i", log_velocity_gradient, covariance, log_velocity_gradient), 0.0,
+                ))
+                acceleration_sigmas = accelerations * np.sqrt(np.maximum(
+                    np.einsum("ij,jk,ik->i", log_acceleration_gradient, covariance, log_acceleration_gradient), 0.0,
+                ))
+            else:
+                velocity_sigmas = np.sqrt(
+                    np.square(velocities * amplitude_sigma / amplitude)
+                    + np.square(elapsed * velocities * tau_sigma / np.square(tau))
+                )
+                acceleration_sigmas = accelerations * np.sqrt(
+                    np.square(velocity_sigmas / velocities) + np.square(tau_sigma / tau)
+                )
         elif model == "power":
             amplitude = positive_float(row.get("power_amplitude_at_start"))
-            amplitude_sigma = nonnegative_float(row.get("power_amplitude_at_start_sigma"))
+            amplitude_sigma = nonnegative_float(row.get("power_amplitude_at_start_sigma")) * sigma_scale
             time_offset = positive_float(row.get("power_time_offset"))
-            time_offset_sigma = nonnegative_float(row.get("power_time_offset_sigma"))
+            time_offset_sigma = nonnegative_float(row.get("power_time_offset_sigma")) * sigma_scale
             beta = finite_float(row.get("power_beta"))
-            beta_sigma = nonnegative_float(row.get("power_beta_sigma"))
+            beta_sigma = nonnegative_float(row.get("power_beta_sigma")) * sigma_scale
             if not all(np.isfinite(v) for v in (amplitude, amplitude_sigma, time_offset, time_offset_sigma, beta, beta_sigma)) or beta >= 0.0 or time_offset <= duration:
                 continue
             p = -beta
             remaining = time_offset - elapsed
             velocities = amplitude * np.power(remaining / time_offset, p)
             accelerations = velocities * p / remaining
-            velocity_sigmas = velocities * np.sqrt(
-                np.square(amplitude_sigma / amplitude)
-                + np.square(p * (1.0 / remaining - 1.0 / time_offset) * time_offset_sigma)
-                + np.square(np.log(remaining / time_offset) * beta_sigma)
-            )
-            acceleration_sigmas = accelerations * np.sqrt(
-                np.square(amplitude_sigma / amplitude)
-                + np.square(((p - 1.0) / remaining - p / time_offset) * time_offset_sigma)
-                + np.square((1.0 / p + np.log(remaining / time_offset)) * beta_sigma)
-            )
+            covariance = covariance_from_row(row, (
+                "power_cov_log_amplitude_log_amplitude",
+                "power_cov_log_amplitude_log_q_margin",
+                "power_cov_log_amplitude_log_p",
+                "power_cov_log_q_margin_log_q_margin",
+                "power_cov_log_q_margin_log_p",
+                "power_cov_log_p_log_p",
+            ))
+            if covariance is not None:
+                q = time_offset / duration
+                ratio = remaining / time_offset
+                q_margin = q - 1.0
+                log_q_gradient = p * (1.0 / (q - elapsed / duration) - 1.0 / q) * q_margin
+                log_velocity_gradient = np.column_stack((
+                    np.ones_like(elapsed), log_q_gradient, p * np.log(ratio),
+                ))
+                log_acceleration_gradient = np.column_stack((
+                    np.ones_like(elapsed),
+                    q_margin * ((p - 1.0) / (q - elapsed / duration) - p / q),
+                    1.0 + p * np.log(ratio),
+                ))
+                velocity_sigmas = velocities * np.sqrt(np.maximum(
+                    np.einsum("ij,jk,ik->i", log_velocity_gradient, covariance, log_velocity_gradient), 0.0,
+                ))
+                acceleration_sigmas = accelerations * np.sqrt(np.maximum(
+                    np.einsum("ij,jk,ik->i", log_acceleration_gradient, covariance, log_acceleration_gradient), 0.0,
+                ))
+            else:
+                velocity_sigmas = velocities * np.sqrt(
+                    np.square(amplitude_sigma / amplitude)
+                    + np.square(p * (1.0 / remaining - 1.0 / time_offset) * time_offset_sigma)
+                    + np.square(np.log(remaining / time_offset) * beta_sigma)
+                )
+                acceleration_sigmas = accelerations * np.sqrt(
+                    np.square(amplitude_sigma / amplitude)
+                    + np.square(((p - 1.0) / remaining - p / time_offset) * time_offset_sigma)
+                    + np.square((1.0 / p + np.log(remaining / time_offset)) * beta_sigma)
+                )
         else:
             continue
 
@@ -883,7 +972,12 @@ def main() -> None:
     )
     parser.add_argument("--min-velocity-cm-s", type=float, default=1.0e2)
     parser.add_argument("--max-velocity-cm-s", type=float, default=1.0e8)
-    parser.add_argument("--max-relative-sigma", type=float, default=0.5)
+    parser.add_argument(
+        "--max-relative-sigma",
+        type=float,
+        default=DEFAULT_MAX_RELATIVE_SIGMA,
+        help="Optional relative-acceleration-error exclusion threshold; default keeps all valid points.",
+    )
     parser.add_argument(
         "--points-per-condition",
         type=int,

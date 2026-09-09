@@ -76,10 +76,15 @@ class FitResult:
     residual_lag1_correlation: float = math.nan
     residual_fft_first_zero_correlation_time_s: float = math.nan
     residual_fft_first_zero_lag_samples: float = math.nan
+    residual_effective_sample_count: float = math.nan
+    residual_covariance_inflation: float = math.nan
     exponential_amplitude: float = math.nan
     exponential_amplitude_sigma: float = math.nan
     exponential_tau: float = math.nan
     exponential_tau_sigma: float = math.nan
+    exponential_cov_log_amplitude_log_amplitude: float = math.nan
+    exponential_cov_log_amplitude_log_tau: float = math.nan
+    exponential_cov_log_tau_log_tau: float = math.nan
     exponential_rmse: float = math.nan
     exponential_chi2: float = math.nan
     exponential_reduced_chi2: float = math.nan
@@ -94,6 +99,12 @@ class FitResult:
     power_alpha_sigma: float = math.nan
     power_beta: float = math.nan
     power_beta_sigma: float = math.nan
+    power_cov_log_amplitude_log_amplitude: float = math.nan
+    power_cov_log_amplitude_log_q_margin: float = math.nan
+    power_cov_log_amplitude_log_p: float = math.nan
+    power_cov_log_q_margin_log_q_margin: float = math.nan
+    power_cov_log_q_margin_log_p: float = math.nan
+    power_cov_log_p_log_p: float = math.nan
     power_rmse: float = math.nan
     power_chi2: float = math.nan
     power_reduced_chi2: float = math.nan
@@ -332,17 +343,17 @@ def intervals_overlap(mean_a: float, sem_a: float, mean_b: float, sem_b: float) 
     return max(mean_a - sem_a, mean_b - sem_b) <= min(mean_a + sem_a, mean_b + sem_b)
 
 
-def residual_first_zero_correlation_time_fft(
+def residual_fft_diagnostics(
     times: np.ndarray, residuals: np.ndarray,
-) -> tuple[float, float]:
-    """Estimate a residual correlation time from the first FFT-ACF zero.
+) -> dict[str, np.ndarray | float] | None:
+    """Return FFT residual-spectrum and autocorrelation diagnostics.
 
     The raw-dump reader deliberately retains early snapshots more densely, so
     its times are not generally uniformly spaced.  Residuals are therefore
     linearly interpolated onto an equally spaced grid before applying the
-    Wiener--Khinchin FFT autocorrelation calculation.  The returned time is
-    linearly interpolated between the adjacent ACF samples that straddle zero;
-    both return values are NaN when a meaningful first zero is unavailable.
+    Wiener--Khinchin FFT autocorrelation calculation.  The first ACF zero is
+    linearly interpolated between adjacent samples.  ``None`` denotes an
+    unavailable diagnostic (too few points, no residual variance, etc.).
 
     This is a diagnostic correlation scale, not an uncertainty correction by
     itself: the decay trajectory is nonstationary and the residual series is
@@ -352,16 +363,16 @@ def residual_first_zero_correlation_time_fft(
     time = np.asarray(times[valid], dtype=np.float64)
     residual = np.asarray(residuals[valid], dtype=np.float64)
     if len(time) < 4 or np.any(np.diff(time) <= 0.0):
-        return math.nan, math.nan
+        return None
     duration = float(time[-1] - time[0])
     if not np.isfinite(duration) or duration <= 0.0:
-        return math.nan, math.nan
+        return None
     uniform_time = np.linspace(time[0], time[-1], len(time))
     uniform_residual = np.interp(uniform_time, time, residual)
     uniform_residual -= np.mean(uniform_residual)
     variance = float(np.mean(np.square(uniform_residual)))
     if not np.isfinite(variance) or variance <= np.finfo(float).tiny:
-        return math.nan, math.nan
+        return None
 
     # Zero-pad so that the first ``n`` entries represent the linear rather
     # than circular autocovariance at non-negative lags.
@@ -371,15 +382,66 @@ def residual_first_zero_correlation_time_fft(
     autocovariance = np.fft.irfft(np.abs(spectrum) ** 2, n=n_fft)[:n_samples]
     autocorrelation = autocovariance / autocovariance[0]
     crossings = np.flatnonzero(autocorrelation[1:] <= 0.0)
-    if crossings.size == 0:
-        return math.nan, math.nan
-    right = int(crossings[0] + 1)
-    left = right - 1
-    left_value, right_value = autocorrelation[left], autocorrelation[right]
-    fraction = left_value / (left_value - right_value) if left_value != right_value else 0.0
-    lag_samples = left + fraction
     sample_spacing = duration / (n_samples - 1)
-    return float(lag_samples * sample_spacing), float(lag_samples)
+    zero_lag_samples = math.nan
+    zero_time_s = math.nan
+    if crossings.size:
+        right = int(crossings[0] + 1)
+        left = right - 1
+        left_value, right_value = autocorrelation[left], autocorrelation[right]
+        fraction = left_value / (left_value - right_value) if left_value != right_value else 0.0
+        zero_lag_samples = float(left + fraction)
+        zero_time_s = float(zero_lag_samples * sample_spacing)
+    # The unpadded transform is the readable residual power spectrum.  The
+    # padded transform above is retained exclusively for linear ACF lags.
+    raw_spectrum = np.fft.rfft(uniform_residual)
+    frequencies_hz = np.fft.rfftfreq(n_samples, d=sample_spacing)
+    power = np.square(np.abs(raw_spectrum)) / n_samples
+    return {
+        "uniform_time_s": uniform_time,
+        "uniform_residual": uniform_residual,
+        "lag_time_s": np.arange(n_samples, dtype=np.float64) * sample_spacing,
+        "autocorrelation": autocorrelation,
+        "frequency_hz": frequencies_hz,
+        "power": power,
+        "first_zero_time_s": zero_time_s,
+        "first_zero_lag_samples": zero_lag_samples,
+    }
+
+
+def residual_first_zero_correlation_time_fft(
+    times: np.ndarray, residuals: np.ndarray,
+) -> tuple[float, float]:
+    """Return first-zero time and lag from :func:`residual_fft_diagnostics`."""
+    diagnostics = residual_fft_diagnostics(times, residuals)
+    if diagnostics is None:
+        return math.nan, math.nan
+    return (
+        float(diagnostics["first_zero_time_s"]),
+        float(diagnostics["first_zero_lag_samples"]),
+    )
+
+
+def correlation_effective_sample_count(
+    n_samples: int, duration_s: float, correlation_time_s: float,
+) -> tuple[float, float]:
+    """Return ``(N_eff, covariance_inflation)`` from first-zero ACF time.
+
+    A fit window of duration ``T`` contains ``T/tau_0`` uncorrelated
+    correlation-time lengths.  The ordinary weighted least-squares covariance
+    treats all saved snapshots as independent, so it is multiplied by
+    ``N_raw/N_eff``.  ``N_eff`` is bounded to [1, N_raw]: neither a window
+    shorter than one correlation time nor an unresolved sub-snapshot
+    correlation time can create more information than is present.
+    """
+    if n_samples < 1:
+        return math.nan, math.nan
+    if not np.isfinite(correlation_time_s) or correlation_time_s <= 0.0:
+        return float(n_samples), 1.0
+    if not np.isfinite(duration_s) or duration_s <= 0.0:
+        return float(n_samples), 1.0
+    effective_samples = min(float(n_samples), max(1.0, duration_s / correlation_time_s))
+    return effective_samples, float(n_samples / effective_samples)
 
 
 def exp_model(time: np.ndarray, log_amplitude: float, log_tau: float) -> np.ndarray:
@@ -569,8 +631,24 @@ def fit_decay(
         power_rmse = float(np.sqrt(np.mean(np.square(power_raw))))
         exp_r2 = 1.0 - float(np.sum(np.square(exp_raw))) / ss_total if ss_total > 0 else math.nan
         power_r2 = 1.0 - float(np.sum(np.square(power_raw))) / ss_total if ss_total > 0 else math.nan
-        exp_covariance = np.linalg.pinv(exp_fit.jac.T @ exp_fit.jac) * exp_chi2
-        power_covariance = np.linalg.pinv(power_fit.jac.T @ power_fit.jac) * power_chi2
+        duration_s = float(fit_time[-1] - fit_time[0])
+        exp_correlation_time, exp_correlation_lag = residual_first_zero_correlation_time_fft(
+            fit_time, exp_raw,
+        )
+        power_correlation_time, power_correlation_lag = residual_first_zero_correlation_time_fft(
+            fit_time, power_raw,
+        )
+        exp_effective_samples, exp_covariance_inflation = correlation_effective_sample_count(
+            len(fit_time), duration_s, exp_correlation_time,
+        )
+        power_effective_samples, power_covariance_inflation = correlation_effective_sample_count(
+            len(fit_time), duration_s, power_correlation_time,
+        )
+        # The unscaled covariance is conditional on independently saved
+        # snapshots.  Inflate it by N_raw/N_eff using the residual ACF's
+        # first-zero correlation-time estimate for the corresponding model.
+        exp_covariance = np.linalg.pinv(exp_fit.jac.T @ exp_fit.jac) * exp_chi2 * exp_covariance_inflation
+        power_covariance = np.linalg.pinv(power_fit.jac.T @ power_fit.jac) * power_chi2 * power_covariance_inflation
         log_sigmas = np.sqrt(np.maximum(np.diag(exp_covariance), 0.0))
         tau_sigma = tau * log_sigmas[1]
         amplitude_sigma = amplitude * log_sigmas[0]
@@ -619,9 +697,16 @@ def fit_decay(
             if len(selected_raw) >= 3 and np.std(selected_raw) > 0
             else math.nan
         )
-        residual_correlation_time, residual_correlation_lag = residual_first_zero_correlation_time_fft(
-            fit_time, selected_raw,
-        )
+        if best_model == "exponential":
+            residual_correlation_time = exp_correlation_time
+            residual_correlation_lag = exp_correlation_lag
+            residual_effective_samples = exp_effective_samples
+            residual_covariance_inflation = exp_covariance_inflation
+        else:
+            residual_correlation_time = power_correlation_time
+            residual_correlation_lag = power_correlation_lag
+            residual_effective_samples = power_effective_samples
+            residual_covariance_inflation = power_covariance_inflation
 
         flags = []
         if not selected_fit.success:
@@ -647,6 +732,9 @@ def fit_decay(
         result.exponential_amplitude_sigma = amplitude_sigma
         result.exponential_tau = tau
         result.exponential_tau_sigma = tau_sigma
+        result.exponential_cov_log_amplitude_log_amplitude = float(exp_covariance[0, 0])
+        result.exponential_cov_log_amplitude_log_tau = float(exp_covariance[0, 1])
+        result.exponential_cov_log_tau_log_tau = float(exp_covariance[1, 1])
         result.exponential_rmse = exp_rmse
         result.exponential_chi2 = exp_chi2_total
         result.exponential_reduced_chi2 = exp_chi2
@@ -661,6 +749,12 @@ def fit_decay(
         result.power_alpha_sigma = alpha_sigma
         result.power_beta = beta
         result.power_beta_sigma = p_sigma
+        result.power_cov_log_amplitude_log_amplitude = float(power_covariance[0, 0])
+        result.power_cov_log_amplitude_log_q_margin = float(power_covariance[0, 1])
+        result.power_cov_log_amplitude_log_p = float(power_covariance[0, 2])
+        result.power_cov_log_q_margin_log_q_margin = float(power_covariance[1, 1])
+        result.power_cov_log_q_margin_log_p = float(power_covariance[1, 2])
+        result.power_cov_log_p_log_p = float(power_covariance[2, 2])
         result.power_rmse = power_rmse
         result.power_chi2 = power_chi2_total
         result.power_reduced_chi2 = power_chi2
@@ -675,6 +769,8 @@ def fit_decay(
         result.residual_lag1_correlation = lag1
         result.residual_fft_first_zero_correlation_time_s = residual_correlation_time
         result.residual_fft_first_zero_lag_samples = residual_correlation_lag
+        result.residual_effective_sample_count = residual_effective_samples
+        result.residual_covariance_inflation = residual_covariance_inflation
         result.quality_flags = ";".join(sorted(set(flags)))
         result.status = "ok" if not flags else "review"
         result.message = f"exponential: {exp_fit.message}; power: {power_fit.message}"
@@ -710,7 +806,7 @@ def plot_fit_diagnostic(
     result: FitResult,
     config: FitConfig,
 ) -> None:
-    """Write a two-panel, review-oriented diagnostic for one campaign."""
+    """Write fit, residual, FFT-spectrum, and ACF diagnostics for one run."""
     os.environ.setdefault("MPLCONFIGDIR", str(path.parent / ".matplotlib"))
     import matplotlib
 
@@ -736,13 +832,12 @@ def plot_fit_diagnostic(
         }
     )
 
-    fig, (ax, residual_ax) = plt.subplots(
-        2,
-        1,
-        figsize=(11, 7.5),
-        sharex=True,
-        gridspec_kw={"height_ratios": [3, 1]},
-    )
+    fig = plt.figure(figsize=(12, 10))
+    grid = fig.add_gridspec(3, 2, height_ratios=[3.0, 1.2, 1.5])
+    ax = fig.add_subplot(grid[0, :])
+    residual_ax = fig.add_subplot(grid[1, :], sharex=ax)
+    autocorrelation_ax = fig.add_subplot(grid[2, 0])
+    spectrum_ax = fig.add_subplot(grid[2, 1])
     ax.plot(scaled_time[plot_slice], mean[plot_slice], color="#1565c0", linewidth=1.2, label="mean projected Si velocity")
     ax.fill_between(
         scaled_time[plot_slice], mean[plot_slice] - sem[plot_slice], mean[plot_slice] + sem[plot_slice],
@@ -761,7 +856,8 @@ def plot_fit_diagnostic(
         ax.plot(scaled_time[start:end], power_values, color="#6a1b9a", linewidth=2.0, label="power fit")
         safe_sem = np.maximum(sem, config.sigma_floor_fraction * max(abs(result.initial_mean_velocity), 1.0))
         selected = exp_values if result.best_model == "exponential" else power_values
-        normalized = (mean[start:end] - selected) / safe_sem[start:end]
+        selected_raw = mean[start:end] - selected
+        normalized = selected_raw / safe_sem[start:end]
         residual_ax.plot(scaled_time[start:end], normalized, color="#455a64", marker=".", markersize=3, linewidth=0.8)
         residual_ax.axhline(2.0, color="0.6", linestyle=":", linewidth=0.8)
         residual_ax.axhline(-2.0, color="0.6", linestyle=":", linewidth=0.8)
@@ -776,8 +872,52 @@ def plot_fit_diagnostic(
             0.98, 0.04, metrics, transform=ax.transAxes, ha="right", va="bottom",
             fontsize=9, bbox={"facecolor": "white", "edgecolor": "0.7", "alpha": 0.9},
         )
+        diagnostics = residual_fft_diagnostics(fit_times, selected_raw)
+        if diagnostics is not None:
+            lag_ps = np.asarray(diagnostics["lag_time_s"]) * 1.0e12
+            autocorrelation = np.asarray(diagnostics["autocorrelation"])
+            autocorrelation_ax.axhline(0.0, color="black", linewidth=0.8)
+            autocorrelation_ax.plot(lag_ps, autocorrelation, color="#00838f", linewidth=1.2, label="FFT ACF")
+            zero_time_s = float(diagnostics["first_zero_time_s"])
+            if np.isfinite(zero_time_s):
+                autocorrelation_ax.axvline(
+                    zero_time_s * 1.0e12, color="#c62828", linestyle="--", linewidth=1.2,
+                    label=fr"first zero = {zero_time_s * 1.0e12:.3g} ps",
+                )
+            autocorrelation_ax.set_xlim(0.0, float(lag_ps[-1]))
+            autocorrelation_ax.set_xlabel("lag (ps)")
+            autocorrelation_ax.set_ylabel("residual ACF")
+            autocorrelation_ax.legend(fontsize=8)
+            autocorrelation_ax.grid(alpha=0.25)
+
+            frequency_thz = np.asarray(diagnostics["frequency_hz"]) * 1.0e-12
+            power = np.asarray(diagnostics["power"])
+            positive = (frequency_thz > 0.0) & np.isfinite(power) & (power > 0.0)
+            if np.any(positive):
+                spectrum_ax.plot(frequency_thz[positive], power[positive], color="#6a1b9a", linewidth=1.2)
+                spectrum_ax.set_yscale("log")
+            else:
+                spectrum_ax.text(0.5, 0.5, "No non-zero FFT bins", transform=spectrum_ax.transAxes, ha="center", va="center")
+            spectrum_ax.set_xlabel("frequency (THz)")
+            spectrum_ax.set_ylabel("residual FFT power")
+            spectrum_ax.grid(alpha=0.25)
+            diagnostics_text = (
+                fr"$N_{{\rm raw}}={result.n_fit_points}$, "
+                fr"$N_{{\rm eff}}={result.residual_effective_sample_count:.3g}$\n"
+                fr"covariance scale = {result.residual_covariance_inflation:.3g}"
+            )
+            autocorrelation_ax.text(
+                0.98, 0.95, diagnostics_text, transform=autocorrelation_ax.transAxes,
+                ha="right", va="top", fontsize=8,
+                bbox={"facecolor": "white", "edgecolor": "0.7", "alpha": 0.9},
+            )
+        else:
+            autocorrelation_ax.text(0.5, 0.5, "Residual ACF unavailable", transform=autocorrelation_ax.transAxes, ha="center", va="center")
+            spectrum_ax.text(0.5, 0.5, "Residual FFT unavailable", transform=spectrum_ax.transAxes, ha="center", va="center")
     else:
         residual_ax.text(0.5, 0.5, "No valid fit", transform=residual_ax.transAxes, ha="center", va="center")
+        autocorrelation_ax.axis("off")
+        spectrum_ax.axis("off")
 
     ax.set_title(
         f"Condition {result.condition}, nominal velocity {result.nominal_velocity_cm_s:.3g} cm/s",
